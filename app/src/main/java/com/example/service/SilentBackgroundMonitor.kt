@@ -22,6 +22,7 @@ import com.example.model.BatteryHardwareSnapshot
 import com.example.model.BatterySaverMode
 import com.example.model.RestrictionExecutionStatus
 import com.example.model.UserSettings
+import com.example.update.UpdateLockManager
 import kotlin.math.abs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -253,6 +254,12 @@ object SilentBackgroundMonitorEngine {
             val settings = dataStore.getSettingsSnapshot()
             latestSettings = settings
 
+            val isUpdateLocked = if (triggerAction == Intent.ACTION_POWER_CONNECTED) {
+                UpdateLockManager.refreshIfStaleAndCheckLocked(appContext)
+            } else {
+                UpdateLockManager.isUpdateLockActive(appContext)
+            }
+
             val voiceAssistant = BatteryTelemetryHub.getOrCreateVoiceAssistant(appContext)
             voiceAssistant.ensureEngineAliveAndSyncSettings(settings)
             voiceAssistant.evaluateSnapshotAndAnnounceNow(
@@ -261,7 +268,9 @@ object SilentBackgroundMonitorEngine {
                 settingsOverride = settings
             )
 
-            persistSnapshotAndEvaluateAutoSaver(appContext, alignedSnap, settings, dataStore)
+            if (!isUpdateLocked) {
+                persistSnapshotAndEvaluateAutoSaver(appContext, alignedSnap, settings, dataStore)
+            }
             alignedSnap
         } finally {
             BatteryTelemetryHub.releaseBoundedWakeLock(wakeLockHandle)
@@ -382,10 +391,12 @@ object SilentBackgroundMonitorEngine {
         val voiceAssistant = BatteryTelemetryHub.getOrCreateVoiceAssistant(appContext)
         voiceAssistant.evaluateSnapshotAndAnnounce(snapshot, explicitEvent)
 
-        engineScope.launch(Dispatchers.IO) {
-            val dataStore = SettingsDataStore(appContext)
-            val settings = latestSettings
-            persistSnapshotAndEvaluateAutoSaver(appContext, snapshot, settings, dataStore)
+        if (!UpdateLockManager.isUpdateLockActive(appContext)) {
+            engineScope.launch(Dispatchers.IO) {
+                val dataStore = SettingsDataStore(appContext)
+                val settings = latestSettings
+                persistSnapshotAndEvaluateAutoSaver(appContext, snapshot, settings, dataStore)
+            }
         }
     }
 

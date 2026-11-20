@@ -1,9 +1,12 @@
 package com.example
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -82,6 +85,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -111,6 +115,7 @@ import kotlin.math.cos
 import kotlin.math.sin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import com.example.ui.screens.BatteryHealthScreen
 import com.example.ui.screens.DashboardScreen
 import com.example.ui.screens.HardwareAndOemScreen
@@ -126,7 +131,12 @@ import com.example.ui.theme.NavySurfaceElevated
 import com.example.ui.theme.ObsidianBackground
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
+import com.example.ui.components.AppUpdateOverlay
 import com.example.ui.theme.ThermalCrimson
+import com.example.update.AppUpdateInfo
+import com.example.update.UpdateFetchResult
+import com.example.update.UpdateLockManager
+import com.example.update.UpdateRepository
 import com.example.viewmodel.BatteryBossViewModel
 
 enum class BatteryBossTab(
@@ -159,7 +169,13 @@ class MainActivity : ComponentActivity() {
 fun BatteryBossEntryScreen(
     viewModel: BatteryBossViewModel = viewModel()
 ) {
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    val updateRepository = remember { UpdateRepository() }
     var showSplash by rememberSaveable { mutableStateOf(true) }
+    var pendingUpdate by remember {
+        mutableStateOf(UpdateLockManager.getCachedUpdateInfo(context))
+    }
 
     LaunchedEffect(Unit) {
         if (showSplash) {
@@ -167,6 +183,26 @@ fun BatteryBossEntryScreen(
             showSplash = false
         }
     }
+
+    // Non-blocking background check against Firebase Realtime Database (never crashes if offline)
+    LaunchedEffect(Unit) {
+        val result = updateRepository.fetchUpdate(currentVersion = BuildConfig.VERSION_NAME)
+        UpdateLockManager.syncFromFetchResult(context, result)
+        when (result) {
+            is UpdateFetchResult.UpdateAvailable -> {
+                pendingUpdate = result.info
+            }
+            is UpdateFetchResult.UpToDate -> {
+                pendingUpdate = null
+            }
+            is UpdateFetchResult.Error -> {
+                // Keep cached lock state if offline after an update was previously pushed
+            }
+        }
+    }
+
+    val activeUpdate = pendingUpdate
+    var isHandlingUpdateClick by remember { mutableStateOf(false) }
 
     AnimatedContent(
         targetState = showSplash,
@@ -179,9 +215,52 @@ fun BatteryBossEntryScreen(
     ) { isSplashVisible ->
         if (isSplashVisible) {
             BatteryBossSplashScreen()
-        } else {
+        } else if (activeUpdate == null) {
             BatteryBossApp(viewModel = viewModel)
+        } else {
+            // App functions remain locked while a remote update is active
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(ObsidianBackground)
+            )
         }
+    }
+
+    if (!showSplash && activeUpdate != null) {
+        AppUpdateOverlay(
+            updateInfo = activeUpdate.copy(mandatory = true),
+            onUpdateClick = { apkUrl ->
+                if (isHandlingUpdateClick) return@AppUpdateOverlay
+                isHandlingUpdateClick = true
+
+                coroutineScope.launch {
+                    try {
+                        withTimeoutOrNull(2_000L) {
+                            runCatching { updateRepository.incrementDownloadClicks() }
+                        }
+
+                        if (apkUrl.isNotBlank()) {
+                            runCatching {
+                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(apkUrl)).apply {
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                context.startActivity(intent)
+                            }.onFailure {
+                                Toast.makeText(
+                                    context,
+                                    context.getString(R.string.update_open_link_error),
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        }
+                    } finally {
+                        isHandlingUpdateClick = false
+                    }
+                }
+            },
+            onDismiss = { /* Locked while remote update is active */ }
+        )
     }
 }
 

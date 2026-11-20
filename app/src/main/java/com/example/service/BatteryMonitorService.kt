@@ -36,6 +36,7 @@ import com.example.model.RestrictionExecutionStatus
 import com.example.model.SelfPowerAuditReport
 import com.example.model.TelemetrySamplePoint
 import com.example.model.UserSettings
+import com.example.update.UpdateLockManager
 import com.example.voice.OfflineVoiceAssistant
 import java.util.Collections
 import java.util.Locale
@@ -703,6 +704,9 @@ class BatteryMonitorService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_SPEAK_NOW -> {
+                if (UpdateLockManager.isUpdateLockActive(applicationContext)) {
+                    return START_STICKY
+                }
                 val rawSnap = hardwareReader.readSnapshot()
                 val snap = if (rawSnap.percentage == 0 &&
                     rawSnap.statusLabel == "Unknown" &&
@@ -867,6 +871,11 @@ class BatteryMonitorService : Service() {
                 voiceAssistant.ensureEngineAliveAndSyncSettings(freshSettings)
 
                 delay(120L)
+                val isUpdateLocked = if (action == Intent.ACTION_POWER_CONNECTED) {
+                    UpdateLockManager.refreshIfStaleAndCheckLocked(applicationContext)
+                } else {
+                    UpdateLockManager.isUpdateLockActive(applicationContext)
+                }
                 val rawSnap = hardwareReader.readSnapshot(null)
                 val alignedSnap = when (action) {
                     Intent.ACTION_POWER_CONNECTED -> rawSnap.copy(isCharging = true)
@@ -880,7 +889,9 @@ class BatteryMonitorService : Service() {
                     explicitTriggerEvent = action,
                     settingsOverride = freshSettings
                 )
-                persistSnapshotToDatabaseAsync(alignedSnap, freshSettings)
+                if (!isUpdateLocked) {
+                    persistSnapshotToDatabaseAsync(alignedSnap, freshSettings)
+                }
             } finally {
                 BatteryTelemetryHub.releaseBoundedWakeLock(wakeLockHandle)
             }
@@ -915,7 +926,9 @@ class BatteryMonitorService : Service() {
             }
         }
 
-        persistSnapshotToDatabaseAsync(snapshot, currentSettings)
+        if (!UpdateLockManager.isUpdateLockActive(applicationContext)) {
+            persistSnapshotToDatabaseAsync(snapshot, currentSettings)
+        }
     }
 
     private fun persistSnapshotToDatabaseAsync(

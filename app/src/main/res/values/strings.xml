@@ -8,4 +8,10 @@
     <string name="notification_channel_name">Battery Boss Live Monitor</string>
     <string name="notification_channel_desc">Persistent background battery monitoring and voice announcements</string>
     <string name="na_value">N/A</string>
+    <string name="update_default_title">ABOUT UPDATE</string>
+    <string name="update_button_label">Update</string>
+    <string name="update_not_now_label">Not now</string>
+    <string name="update_rocket_content_desc">App update rocket illustration</string>
+    <string name="update_download_toast_message">Sir, abhi app mein update aa gaya hai. Please download the new version.</string>
+    <string name="update_open_link_error">Unable to open download link. Please check your browser.</string>
 </resources>

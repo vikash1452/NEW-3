@@ -27,6 +27,7 @@ import com.example.model.VoiceLanguage
 import com.example.model.VoiceModelState
 import com.example.model.VoiceProfilePreset
 import com.example.service.BatteryTelemetryHub
+import com.example.update.UpdateLockManager
 import java.io.File
 import java.util.Calendar
 import java.util.Locale
@@ -721,6 +722,40 @@ class OfflineVoiceAssistant(
             return null
         }
 
+        // When an active remote update is locked from Firebase:
+        // Block ALL normal battery announcements; ONLY speak the hidden update alert on charger plug-in.
+        if (UpdateLockManager.isUpdateLockActive(context)) {
+            val previousCharging = lastChargingState
+            val isConnectEvent = explicitTriggerEvent == Intent.ACTION_POWER_CONNECTED ||
+                (explicitTriggerEvent == null && previousCharging != null && !previousCharging && snapshot.isCharging)
+            lastChargingState = snapshot.isCharging
+
+            if (isConnectEvent) {
+                val isDuplicateConnect = lastAnnouncedPowerAction == Intent.ACTION_POWER_CONNECTED &&
+                    (now - lastConnectEventTimeMillis in 0 until powerEventDebounceWindowMs)
+                if (!isDuplicateConnect) {
+                    lastConnectEventTimeMillis = now
+                    lastAnnouncedPowerAction = Intent.ACTION_POWER_CONNECTED
+                    val updateVoiceMsg = UpdateLockManager.buildHiddenUpdateVoiceMessage(settings.language)
+                    enqueueAndLog(
+                        eventType = "App Update Alert",
+                        message = updateVoiceMsg,
+                        priority = AnnouncementPriority.IMPORTANT,
+                        settings = settings,
+                        snapshot = snapshot,
+                        bypassQuietHours = true
+                    )
+                    return updateVoiceMsg
+                }
+            } else if (explicitTriggerEvent == Intent.ACTION_POWER_DISCONNECTED ||
+                (explicitTriggerEvent == null && previousCharging != null && previousCharging && !snapshot.isCharging)
+            ) {
+                lastDisconnectEventTimeMillis = now
+                lastAnnouncedPowerAction = Intent.ACTION_POWER_DISCONNECTED
+            }
+            return null
+        }
+
         // Priority 1 – CRITICAL: High Temperature Warning (preserved in all Saver modes)
         val tempC = snapshot.temperatureCelsius
         if (tempC != null && settings.announceTemperatureWarning && tempC >= settings.temperatureWarningCelsius) {
@@ -912,6 +947,7 @@ class OfflineVoiceAssistant(
         customMessage: String? = null,
         snapshot: BatteryHardwareSnapshot
     ) {
+        if (UpdateLockManager.isUpdateLockActive(context)) return
         scope.launch {
             val settings = settingsDataStore.getSettingsSnapshot()
             val isHindi = settings.language == VoiceLanguage.HINDI
