@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "820312658682",
+    "project_id": "battery-boss-update-server",
+    "storage_bucket": "battery-boss-update-server.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:820312658682:android:23c4b3d611db8c621daf43",
+        "android_client_info": {
+          "package_name": "com.aistudio.batteryboss.vxqpmk"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDsColi-paYb7hjFYApWQTc6OrDt0Vm9A4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

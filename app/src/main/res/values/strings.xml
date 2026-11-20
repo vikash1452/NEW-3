@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">Battery Boss</string>
+    <string name="app_subtitle">Smart Voice Battery Assistant</string>
+    <string name="nav_dashboard">Dashboard</string>
+    <string name="nav_voice">Voice &amp; Alerts</string>
+    <string name="nav_hardware">Hardware &amp; OEM</string>
+    <string name="nav_history">History &amp; About</string>
+    <string name="notification_channel_name">Battery Boss Live Monitor</string>
+    <string name="notification_channel_desc">Persistent background battery monitoring and voice announcements</string>
+    <string name="na_value">N/A</string>
+</resources>

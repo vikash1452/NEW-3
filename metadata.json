@@ -1,0 +1,6 @@
+{
+  "name": "Battery Boss",
+  "description": "Smart offline Hindi and English voice battery assistant, real-time charging telemetry dashboard, and session analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
