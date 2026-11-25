@@ -15,6 +15,8 @@ import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
+import java.text.SimpleDateFormat
+import java.util.Locale
 
 data class AppUpdateInfo(
     val enabled: Boolean,
@@ -23,7 +25,9 @@ data class AppUpdateInfo(
     val description: String,
     val apkUrl: String,
     val mandatory: Boolean,
-    val downloadClicks: Long = 0L
+    val downloadClicks: Long = 0L,
+    val releaseDateMillis: Long = 0L,
+    val releaseDate: String = ""
 ) {
     val bulletPoints: List<String>
         get() = description
@@ -50,8 +54,9 @@ sealed interface UpdateFetchResult {
  * Internal, UI-invisible gate that tracks whether an active remote update is live on Firebase.
  *
  * Behavior:
- * - When `isUpdateLockActive(context) == false` (normal state): zero effect on app or voice.
- * - When `isUpdateLockActive(context) == true` (update pushed):
+ * - When `isUpdateLockActive(context) == false` (normal state or scheduled future release date):
+ *   zero effect on app or voice.
+ * - When `isUpdateLockActive(context) == true` (newer update live and release date reached):
  *   1. All normal app UI and background battery functions are locked/paused.
  *   2. Whenever the user plugs in the charger, instead of announcing battery percentage,
  *      the voice engine announces ONLY that an app update has arrived.
@@ -64,6 +69,8 @@ object UpdateLockManager {
     private const val KEY_DESCRIPTION = "cached_description"
     private const val KEY_APK_URL = "cached_apk_url"
     private const val KEY_MANDATORY = "cached_mandatory"
+    private const val KEY_RELEASE_DATE_MILLIS = "cached_release_date_millis"
+    private const val KEY_RELEASE_DATE = "cached_release_date"
     private const val KEY_LAST_CHECKED_MS = "last_checked_ms"
 
     private const val BACKGROUND_CACHE_TTL_MS = 30_000L
@@ -82,20 +89,30 @@ object UpdateLockManager {
         }
     }
 
-    fun isUpdateLockActive(context: Context): Boolean {
+    fun isUpdateLockActive(
+        context: Context,
+        nowMillis: Long = System.currentTimeMillis()
+    ): Boolean {
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         if (!prefs.getBoolean(KEY_LOCK_ACTIVE, false)) return false
         val cachedVersion = prefs.getString(KEY_VERSION, "").orEmpty()
-        // Auto-unlock automatically once the user installs the updated APK version
-        if (cachedVersion.isNotEmpty() && !UpdateRepository.isVersionMismatch(BuildConfig.VERSION_NAME, cachedVersion)) {
+        // Auto-unlock once the installed app version is equal to or newer than the cached remote version
+        if (cachedVersion.isNotEmpty() && !UpdateRepository.isNewerVersion(BuildConfig.VERSION_NAME, cachedVersion)) {
             clearLock(context)
+            return false
+        }
+        val cachedReleaseMillis = prefs.getLong(KEY_RELEASE_DATE_MILLIS, 0L)
+        if (!UpdateRepository.isReleaseDateReached(cachedReleaseMillis, nowMillis)) {
             return false
         }
         return true
     }
 
-    fun getCachedUpdateInfo(context: Context): AppUpdateInfo? {
-        if (!isUpdateLockActive(context)) return null
+    fun getCachedUpdateInfo(
+        context: Context,
+        nowMillis: Long = System.currentTimeMillis()
+    ): AppUpdateInfo? {
+        if (!isUpdateLockActive(context, nowMillis)) return null
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val version = prefs.getString(KEY_VERSION, "").orEmpty()
         val apkUrl = prefs.getString(KEY_APK_URL, "").orEmpty()
@@ -106,7 +123,9 @@ object UpdateLockManager {
             title = prefs.getString(KEY_TITLE, "ABOUT UPDATE").orEmpty().ifBlank { "ABOUT UPDATE" },
             description = prefs.getString(KEY_DESCRIPTION, "").orEmpty(),
             apkUrl = apkUrl,
-            mandatory = true
+            mandatory = true,
+            releaseDateMillis = prefs.getLong(KEY_RELEASE_DATE_MILLIS, 0L),
+            releaseDate = prefs.getString(KEY_RELEASE_DATE, "").orEmpty()
         )
     }
 
@@ -122,6 +141,8 @@ object UpdateLockManager {
                     .putString(KEY_DESCRIPTION, result.info.description)
                     .putString(KEY_APK_URL, result.info.apkUrl)
                     .putBoolean(KEY_MANDATORY, true)
+                    .putLong(KEY_RELEASE_DATE_MILLIS, result.info.releaseDateMillis)
+                    .putString(KEY_RELEASE_DATE, result.info.releaseDate)
                     .putLong(KEY_LAST_CHECKED_MS, now)
                     .apply()
             }
@@ -133,6 +154,8 @@ object UpdateLockManager {
                     .remove(KEY_DESCRIPTION)
                     .remove(KEY_APK_URL)
                     .remove(KEY_MANDATORY)
+                    .remove(KEY_RELEASE_DATE_MILLIS)
+                    .remove(KEY_RELEASE_DATE)
                     .putLong(KEY_LAST_CHECKED_MS, now)
                     .apply()
             }
@@ -142,7 +165,12 @@ object UpdateLockManager {
         }
     }
 
-    fun setUpdateLockForTest(context: Context, active: Boolean, version: String = "99.0") {
+    fun setUpdateLockForTest(
+        context: Context,
+        active: Boolean,
+        version: String = "99.0",
+        releaseDateMillis: Long = 0L
+    ) {
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         if (active) {
             prefs.edit()
@@ -152,6 +180,7 @@ object UpdateLockManager {
                 .putString(KEY_DESCRIPTION, "New version available")
                 .putString(KEY_APK_URL, "https://example.com/update.apk")
                 .putBoolean(KEY_MANDATORY, true)
+                .putLong(KEY_RELEASE_DATE_MILLIS, releaseDateMillis)
                 .putLong(KEY_LAST_CHECKED_MS, System.currentTimeMillis())
                 .apply()
         } else {
@@ -202,9 +231,14 @@ object UpdateLockManager {
  * Fetches app update metadata directly from the Firebase Realtime Database REST endpoint:
  * https://admin-50dca-default-rtdb.firebaseio.com/battery_boss_update
  *
- * - Supports both camelCase (`enabled`, `apkUrl`, `mandatory`) and snake_case (`is_enabled`, `apk_url`, `is_mandatory`).
- * - Does NOT apply any `release_date` / future-date blocking check.
- * - Shows update whenever `enabled == true` and server `version` differs from current app version.
+ * - Supports both camelCase (`enabled`, `apkUrl`, `mandatory`, `releaseDateMillis`) and
+ *   snake_case (`is_enabled`, `apk_url`, `is_mandatory`, `release_date_millis`, `release_date`).
+ * - Triggers an update ONLY when:
+ *   1. `enabled == true`,
+ *   2. remote `version` is strictly newer than the installed app version, AND
+ *   3. `releaseDateMillis == 0L` OR `nowMillis >= releaseDateMillis`.
+ * - Prioritizes `releaseDateMillis` over date strings, with safe fallback parsing for `release_date`
+ *   when `releaseDateMillis` is missing or `0L`.
  * - Atomically increments `download_clicks` when the user taps Update.
  */
 class UpdateRepository(
@@ -217,6 +251,17 @@ class UpdateRepository(
         const val UPDATE_NODE_PATH = "battery_boss_update"
         private const val CONNECT_TIMEOUT_MS = 8_000
         private const val READ_TIMEOUT_MS = 8_000
+
+        private val FALLBACK_DATE_PATTERNS = listOf(
+            "dd/MM/yyyy",
+            "d/M/yyyy",
+            "dd MMM yyyy",
+            "d MMM yyyy",
+            "dd-MM-yyyy",
+            "yyyy-MM-dd",
+            "dd MMMM yyyy",
+            "MMM dd, yyyy"
+        )
 
         fun parseUpdateJson(rawJson: String?): AppUpdateInfo? {
             if (rawJson.isNullOrBlank()) return null
@@ -232,6 +277,22 @@ class UpdateRepository(
                 val version = readStringAny(json, "version", "latest_version", "app_version")
                 val title = readStringAny(json, "title", "update_title").ifEmpty { "ABOUT UPDATE" }
                 val downloadClicks = readLongAny(json, "download_clicks", "downloadClicks", defaultValue = 0L)
+                val releaseDateStr = readStringAny(json, "releaseDate", "release_date")
+
+                // Priority 1: explicit releaseDateMillis (camelCase or snake_case)
+                val explicitReleaseMillis = readLongAny(
+                    json,
+                    "releaseDateMillis",
+                    "release_date_millis",
+                    defaultValue = 0L
+                ).coerceAtLeast(0L)
+
+                // Priority 2: safe fallback parsing of date string only when releaseDateMillis is missing/0L
+                val resolvedReleaseDateMillis = if (explicitReleaseMillis > 0L) {
+                    explicitReleaseMillis
+                } else {
+                    parseReleaseDateStringToMillis(releaseDateStr)
+                }
 
                 val description = when (val rawDesc = json.opt("description") ?: json.opt("message")) {
                     is JSONArray -> {
@@ -253,11 +314,33 @@ class UpdateRepository(
                     description = description,
                     apkUrl = apkUrl,
                     mandatory = mandatory,
-                    downloadClicks = downloadClicks
+                    downloadClicks = downloadClicks,
+                    releaseDateMillis = resolvedReleaseDateMillis,
+                    releaseDate = releaseDateStr
                 )
             }.onFailure { error ->
                 runCatching { Log.w(TAG, "Failed to parse update JSON: ${error.message}") }
             }.getOrNull()
+        }
+
+        /**
+         * Safely parses common date strings (e.g., "01/12/2026", "01 Dec 2026", "2026-12-01")
+         * to epoch milliseconds (start of that day in local time). Returns 0L if blank or invalid.
+         */
+        fun parseReleaseDateStringToMillis(dateStr: String?): Long {
+            val cleaned = dateStr?.trim().orEmpty()
+            if (cleaned.isEmpty()) return 0L
+            for (pattern in FALLBACK_DATE_PATTERNS) {
+                val parsed = runCatching {
+                    SimpleDateFormat(pattern, Locale.US).apply {
+                        isLenient = false
+                    }.parse(cleaned)?.time
+                }.getOrNull()
+                if (parsed != null && parsed > 0L) {
+                    return parsed
+                }
+            }
+            return 0L
         }
 
         private fun readBooleanAny(json: JSONObject, vararg keys: String, defaultValue: Boolean): Boolean {
@@ -287,21 +370,55 @@ class UpdateRepository(
         private fun readLongAny(json: JSONObject, vararg keys: String, defaultValue: Long): Long {
             for (key in keys) {
                 if (json.has(key) && !json.isNull(key)) {
-                    return json.optLong(key, defaultValue)
+                    return when (val value = json.opt(key)) {
+                        is Number -> value.toLong()
+                        is String -> value.trim().toLongOrNull() ?: defaultValue
+                        else -> defaultValue
+                    }
                 }
             }
             return defaultValue
         }
 
-        fun isVersionMismatch(currentVersion: String, serverVersion: String): Boolean {
-            val normalizedCurrent = normalizeVersion(currentVersion)
-            val normalizedServer = normalizeVersion(serverVersion)
-            if (normalizedServer.isEmpty()) return false
-            return !normalizedCurrent.equals(normalizedServer, ignoreCase = true)
+        /**
+         * Semantic version comparator returning true ONLY when [serverVersion] is strictly newer
+         * than [currentVersion] (e.g., "2.0" > "1.0", "1.0.1" > "1.0", "2.10" > "2.2", "v2.0" > "1.0").
+         */
+        fun isNewerVersion(currentVersion: String, serverVersion: String): Boolean {
+            val currentParts = normalizeVersionParts(currentVersion)
+            val serverParts = normalizeVersionParts(serverVersion)
+            if (serverParts.isEmpty()) return false
+            if (currentParts.isEmpty()) return true
+
+            val maxLen = maxOf(currentParts.size, serverParts.size)
+            for (i in 0 until maxLen) {
+                val cur = currentParts.getOrElse(i) { 0 }
+                val srv = serverParts.getOrElse(i) { 0 }
+                if (srv != cur) {
+                    return srv > cur
+                }
+            }
+            return false
         }
 
-        private fun normalizeVersion(version: String): String {
-            return version.trim().removePrefix("v").removePrefix("V").trim()
+        private fun normalizeVersionParts(version: String): List<Int> {
+            val cleaned = version.trim().removePrefix("v").removePrefix("V").trim()
+            if (cleaned.isEmpty()) return emptyList()
+            val numericCore = cleaned.substringBefore('-').substringBefore('+')
+            return numericCore
+                .split('.')
+                .mapNotNull { part -> part.filter { it.isDigit() }.toIntOrNull() }
+        }
+
+        /**
+         * Returns true when no release date is scheduled (`releaseDateMillis <= 0L`)
+         * OR the scheduled release timestamp has been reached (`nowMillis >= releaseDateMillis`).
+         */
+        fun isReleaseDateReached(
+            releaseDateMillis: Long,
+            nowMillis: Long = System.currentTimeMillis()
+        ): Boolean {
+            return releaseDateMillis <= 0L || nowMillis >= releaseDateMillis
         }
 
         fun isValidDownloadUrl(url: String): Boolean {
@@ -309,10 +426,41 @@ class UpdateRepository(
             return trimmed.startsWith("https://", ignoreCase = true) ||
                 trimmed.startsWith("http://", ignoreCase = true)
         }
+
+        /**
+         * Evaluates whether a parsed [AppUpdateInfo] should trigger the update dialog at [nowMillis].
+         * Requires BOTH:
+         * 1. Remote version is strictly newer than [currentVersion], AND
+         * 2. Either `releaseDateMillis == 0L` OR `nowMillis >= releaseDateMillis`.
+         */
+        fun evaluateUpdate(
+            info: AppUpdateInfo?,
+            currentVersion: String = BuildConfig.VERSION_NAME,
+            nowMillis: Long = System.currentTimeMillis()
+        ): UpdateFetchResult {
+            if (info == null || !info.enabled) {
+                return UpdateFetchResult.UpToDate
+            }
+
+            if (!isNewerVersion(currentVersion = currentVersion, serverVersion = info.version)) {
+                return UpdateFetchResult.UpToDate
+            }
+
+            if (!isReleaseDateReached(releaseDateMillis = info.releaseDateMillis, nowMillis = nowMillis)) {
+                return UpdateFetchResult.UpToDate
+            }
+
+            if (!isValidDownloadUrl(info.apkUrl)) {
+                return UpdateFetchResult.Error("Invalid APK download URL")
+            }
+
+            return UpdateFetchResult.UpdateAvailable(info)
+        }
     }
 
     suspend fun fetchUpdate(
-        currentVersion: String = BuildConfig.VERSION_NAME
+        currentVersion: String = BuildConfig.VERSION_NAME,
+        nowMillis: Long = System.currentTimeMillis()
     ): UpdateFetchResult = withContext(Dispatchers.IO) {
         if (Build.FINGERPRINT.equals("robolectric", ignoreCase = true)) {
             return@withContext UpdateFetchResult.UpToDate
@@ -338,21 +486,11 @@ class UpdateRepository(
             }
 
             val info = parseUpdateJson(responseBody)
-                ?: return@withContext UpdateFetchResult.UpToDate
-
-            if (!info.enabled) {
-                return@withContext UpdateFetchResult.UpToDate
-            }
-
-            if (!isVersionMismatch(currentVersion = currentVersion, serverVersion = info.version)) {
-                return@withContext UpdateFetchResult.UpToDate
-            }
-
-            if (!isValidDownloadUrl(info.apkUrl)) {
-                return@withContext UpdateFetchResult.Error("Invalid APK download URL")
-            }
-
-            UpdateFetchResult.UpdateAvailable(info)
+            evaluateUpdate(
+                info = info,
+                currentVersion = currentVersion,
+                nowMillis = nowMillis
+            )
         } catch (e: Exception) {
             runCatching { Log.w(TAG, "Update check skipped due to error: ${e.message}") }
             UpdateFetchResult.Error(e.message ?: "Network error")
