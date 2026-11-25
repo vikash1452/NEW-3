@@ -228,7 +228,8 @@ object SilentBackgroundMonitorEngine {
     suspend fun evaluateSilentBackgroundEventNow(
         context: Context,
         triggerAction: String? = null,
-        batteryIntent: Intent? = null
+        batteryIntent: Intent? = null,
+        settingsOverride: UserSettings? = null
     ): BatteryHardwareSnapshot {
         val appContext = context.applicationContext
         val wakeLockHandle = BatteryTelemetryHub.acquireBoundedWakeLock(
@@ -237,11 +238,6 @@ object SilentBackgroundMonitorEngine {
             timeoutMs = BatteryTelemetryHub.MAX_POWER_EVENT_WAKELOCK_MS
         )
         return try {
-            if (triggerAction == Intent.ACTION_POWER_CONNECTED ||
-                triggerAction == Intent.ACTION_POWER_DISCONNECTED
-            ) {
-                delay(120L)
-            }
             val rawSnap = BatteryHardwareReader(appContext).readSnapshot(batteryIntent)
             val alignedSnap = when (triggerAction) {
                 Intent.ACTION_POWER_CONNECTED -> rawSnap.copy(isCharging = true)
@@ -251,22 +247,37 @@ object SilentBackgroundMonitorEngine {
 
             BatteryTelemetryHub.updateSnapshot(alignedSnap)
             val dataStore = SettingsDataStore(appContext)
-            val settings = dataStore.getSettingsSnapshot()
+            val settings = settingsOverride ?: if (
+                (triggerAction == Intent.ACTION_POWER_CONNECTED ||
+                    triggerAction == Intent.ACTION_POWER_DISCONNECTED) &&
+                settingsCollectorJob?.isActive == true
+            ) {
+                latestSettings
+            } else {
+                dataStore.getSettingsSnapshot().also { latestSettings = it }
+            }
             latestSettings = settings
 
-            val isUpdateLocked = if (triggerAction == Intent.ACTION_POWER_CONNECTED) {
-                UpdateLockManager.refreshIfStaleAndCheckLocked(appContext)
-            } else {
-                UpdateLockManager.isUpdateLockActive(appContext)
-            }
+            val isUpdateLocked = UpdateLockManager.isUpdateLockActive(appContext)
 
             val voiceAssistant = BatteryTelemetryHub.getOrCreateVoiceAssistant(appContext)
-            voiceAssistant.ensureEngineAliveAndSyncSettings(settings)
+            voiceAssistant.syncFastSettingsIfNeeded(settings)
             voiceAssistant.evaluateSnapshotAndAnnounceNow(
                 snapshot = alignedSnap,
                 explicitTriggerEvent = triggerAction,
                 settingsOverride = settings
             )
+
+            if (triggerAction == Intent.ACTION_POWER_CONNECTED) {
+                engineScope.launch(Dispatchers.IO) {
+                    val refreshedLocked = UpdateLockManager.refreshIfStaleAndCheckLocked(appContext)
+                    if (refreshedLocked) {
+                        voiceAssistant.prewarmChargerAnnouncement(alignedSnap)
+                    }
+                }
+            } else if (triggerAction == Intent.ACTION_POWER_DISCONNECTED) {
+                voiceAssistant.prewarmChargerAnnouncement(alignedSnap)
+            }
 
             if (!isUpdateLocked) {
                 persistSnapshotAndEvaluateAutoSaver(appContext, alignedSnap, settings, dataStore)
@@ -390,6 +401,9 @@ object SilentBackgroundMonitorEngine {
         BatteryTelemetryHub.updateSnapshot(snapshot)
         val voiceAssistant = BatteryTelemetryHub.getOrCreateVoiceAssistant(appContext)
         voiceAssistant.evaluateSnapshotAndAnnounce(snapshot, explicitEvent)
+        if (!snapshot.isCharging && explicitEvent == null) {
+            voiceAssistant.prewarmChargerAnnouncement(snapshot)
+        }
 
         if (!UpdateLockManager.isUpdateLockActive(appContext)) {
             engineScope.launch(Dispatchers.IO) {

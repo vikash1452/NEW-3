@@ -49,14 +49,16 @@ class BootAndPowerReceiver : BroadcastReceiver() {
                     Intent.ACTION_BATTERY_LOW,
                     Intent.ACTION_BATTERY_OKAY -> {
                         if (settings.backgroundMonitoringEnabled) {
-                            BatteryMonitorService.startService(
-                                context = appContext,
-                                triggerEvent = action
-                            )
+                            BatteryTelemetryHub.setServiceRunning(true)
                             SilentBackgroundMonitorEngine.evaluateSilentBackgroundEventNow(
                                 context = appContext,
                                 triggerAction = action,
-                                batteryIntent = null
+                                batteryIntent = null,
+                                settingsOverride = settings
+                            )
+                            BatteryMonitorService.startService(
+                                context = appContext,
+                                triggerEvent = action
                             )
                         }
                     }

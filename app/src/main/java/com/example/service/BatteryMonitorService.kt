@@ -850,12 +850,10 @@ class BatteryMonitorService : Service() {
     }
 
     /**
-     * Handles ACTION_POWER_CONNECTED / ACTION_POWER_DISCONNECTED reliably even when the screen is off
-     * or the user has exited the app:
-     * acquires a bounded PARTIAL_WAKE_LOCK (<= 3,000ms), syncs persisted VoiceProfilePreset settings,
-     * waits 120ms for the sticky ACTION_BATTERY_CHANGED broadcast to settle so battery percentage is fresh,
-     * aligns isCharging with the power event, evaluates & speaks the announcement inside the WakeLock,
-     * and guarantees WakeLock release in `finally`.
+     * Handles ACTION_POWER_CONNECTED / ACTION_POWER_DISCONNECTED with ultra-low latency (< 200ms):
+     * acquires a bounded PARTIAL_WAKE_LOCK (<= 3,000ms), immediately uses cached settings + cached
+     * UpdateLock state (zero blocking network call, zero artificial sleep), triggers speech FIRST,
+     * and updates notification + background Firebase lock refresh + DB logging afterwards.
      */
     private fun handlePowerConnectionBroadcast(action: String) {
         powerEventRefreshJob?.cancel()
@@ -866,16 +864,10 @@ class BatteryMonitorService : Service() {
                 timeoutMs = BatteryTelemetryHub.MAX_POWER_EVENT_WAKELOCK_MS
             )
             try {
-                val freshSettings = settingsDataStore.getSettingsSnapshot()
-                currentSettings = freshSettings
-                voiceAssistant.ensureEngineAliveAndSyncSettings(freshSettings)
+                val fastSettings = currentSettings
+                voiceAssistant.syncFastSettingsIfNeeded(fastSettings)
 
-                delay(120L)
-                val isUpdateLocked = if (action == Intent.ACTION_POWER_CONNECTED) {
-                    UpdateLockManager.refreshIfStaleAndCheckLocked(applicationContext)
-                } else {
-                    UpdateLockManager.isUpdateLockActive(applicationContext)
-                }
+                val isUpdateLocked = UpdateLockManager.isUpdateLockActive(applicationContext)
                 val rawSnap = hardwareReader.readSnapshot(null)
                 val alignedSnap = when (action) {
                     Intent.ACTION_POWER_CONNECTED -> rawSnap.copy(isCharging = true)
@@ -883,14 +875,28 @@ class BatteryMonitorService : Service() {
                     else -> rawSnap
                 }
                 BatteryTelemetryHub.updateSnapshot(alignedSnap)
-                updateNotification(alignedSnap, forceUpdate = true)
+
+                // Trigger speech FIRST with zero pre-speech network/disk/notification latency!
                 voiceAssistant.evaluateSnapshotAndAnnounceNow(
                     snapshot = alignedSnap,
                     explicitTriggerEvent = action,
-                    settingsOverride = freshSettings
+                    settingsOverride = fastSettings
                 )
+
+                // Non-critical housekeeping runs AFTER speech is already enqueued & starting
+                updateNotification(alignedSnap, forceUpdate = true)
                 if (!isUpdateLocked) {
-                    persistSnapshotToDatabaseAsync(alignedSnap, freshSettings)
+                    persistSnapshotToDatabaseAsync(alignedSnap, fastSettings)
+                }
+                if (action == Intent.ACTION_POWER_CONNECTED) {
+                    serviceScope.launch(Dispatchers.IO) {
+                        val refreshedLocked = UpdateLockManager.refreshIfStaleAndCheckLocked(applicationContext)
+                        if (refreshedLocked) {
+                            voiceAssistant.prewarmChargerAnnouncement(alignedSnap)
+                        }
+                    }
+                } else if (action == Intent.ACTION_POWER_DISCONNECTED) {
+                    voiceAssistant.prewarmChargerAnnouncement(alignedSnap)
                 }
             } finally {
                 BatteryTelemetryHub.releaseBoundedWakeLock(wakeLockHandle)
@@ -915,12 +921,15 @@ class BatteryMonitorService : Service() {
             try {
                 val freshSettings = settingsDataStore.getSettingsSnapshot()
                 currentSettings = freshSettings
-                voiceAssistant.ensureEngineAliveAndSyncSettings(freshSettings)
+                voiceAssistant.syncFastSettingsIfNeeded(freshSettings)
                 voiceAssistant.evaluateSnapshotAndAnnounceNow(
                     snapshot = snapshot,
                     explicitTriggerEvent = explicitEvent,
                     settingsOverride = freshSettings
                 )
+                if (!snapshot.isCharging && explicitEvent == null) {
+                    voiceAssistant.prewarmChargerAnnouncement(snapshot)
+                }
             } finally {
                 BatteryTelemetryHub.releaseBoundedWakeLock(wakeLockHandle)
             }

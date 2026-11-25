@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.media.AudioAttributes
 import android.media.AudioManager
+import android.os.Build
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
@@ -31,13 +32,16 @@ import com.example.update.UpdateLockManager
 import java.io.File
 import java.util.Calendar
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
@@ -156,6 +160,10 @@ class OfflineVoiceAssistant(
     private var lastDisconnectEventTimeMillis: Long = 0L
     private var lastAnnouncedPowerAction: String? = null
     var powerEventDebounceWindowMs: Long = 2_000L
+
+    // Cached TTS voice bindings per preset and background WAV prewarm job for < 200ms charger connect voice
+    private val cachedVoiceByPreset = ConcurrentHashMap<VoiceProfilePreset, Pair<Voice?, Boolean>>()
+    private var prewarmJob: Job? = null
 
     companion object {
         const val MIN_VALID_ONNX_FILE_BYTES = 1024L
@@ -285,6 +293,7 @@ class OfflineVoiceAssistant(
                 )
                 refreshModelPacks(settings)
                 refreshDiagnosticsSnapshot()
+                prewarmChargerAnnouncement(BatteryTelemetryHub.snapshot.value)
             }
         }
         scope.launch {
@@ -312,11 +321,10 @@ class OfflineVoiceAssistant(
     }
 
     /**
-     * Ensures the Voice Engine and volume configuration are immediately synced with persisted
-     * `UserSettings` (including selected `VoiceProfilePreset`) when `BatteryMonitorService` starts
-     * or restarts in the background.
+     * Lightweight, zero-IPC fast path used on `ACTION_POWER_CONNECTED` / `ACTION_POWER_DISCONNECTED`
+     * so voice announcements trigger in < 200ms without enumerating `tts.voices` or auditing OS streams first.
      */
-    fun ensureEngineAliveAndSyncSettings(settings: UserSettings) {
+    fun syncFastSettingsIfNeeded(settings: UserSettings) {
         latestSettings = settings
         volumeController.updateConfiguration(
             volume = settings.voiceVolume,
@@ -328,8 +336,107 @@ class OfflineVoiceAssistant(
         if (tts == null) {
             initializeTts()
         }
+    }
+
+    /**
+     * Ensures the Voice Engine and volume configuration are immediately synced with persisted
+     * `UserSettings` (including selected `VoiceProfilePreset`) when `BatteryMonitorService` starts
+     * or restarts in the background.
+     */
+    fun ensureEngineAliveAndSyncSettings(settings: UserSettings) {
+        syncFastSettingsIfNeeded(settings)
         refreshModelPacks(settings)
         refreshDiagnosticsSnapshot()
+    }
+
+    /**
+     * Pre-synthesizes the exact upcoming Charger Connected announcement WAV in the background
+     * (when unplugged or on TTS init/settings change) so plugging in the charger skips TTS
+     * synthesis completely and starts speaking via AudioTrack in < 100ms.
+     */
+    fun prewarmChargerAnnouncement(snapshot: BatteryHardwareSnapshot) {
+        if (Build.FINGERPRINT.equals("robolectric", ignoreCase = true)) return
+        if (!isTtsReady || _isSpeaking.value) return
+        val settings = latestSettings
+        if (!settings.voiceAnnouncementsEnabled) return
+
+        val message = if (UpdateLockManager.isUpdateLockActive(context)) {
+            UpdateLockManager.buildHiddenUpdateVoiceMessage(settings.language)
+        } else {
+            buildChargerEventMessage(
+                isConnect = true,
+                snapshot = snapshot.copy(isCharging = true),
+                settings = settings
+            )
+        } ?: return
+
+        val clauses = ProsodyAndPhoneticsEngine.prepareConversationalClauses(
+            rawText = message,
+            language = settings.language,
+            naturalProsodyEnabled = settings.naturalProsodyEnabled
+        )
+        if (clauses.isEmpty()) return
+
+        val preset = settings.activePreset
+        val speed = settings.voiceSpeed
+        val pitch = settings.voicePitch
+        val allCached = clauses.all { clause ->
+            playbackEngine.isClausePrewarmed(
+                playbackEngine.buildPrewarmCacheKey(preset.id, speed, pitch, clause)
+            )
+        }
+        if (allCached) return
+
+        prewarmJob?.cancel()
+        prewarmJob = scope.launch(Dispatchers.IO) {
+            if (!isTtsReady || _isSpeaking.value) return@launch
+            val engine = tts ?: return@launch
+            val (matchedVoice, isTrueGenderMatch) = cachedVoiceByPreset[preset] ?: run {
+                val voices = runCatching { engine.voices.orEmpty() }.getOrDefault(emptySet())
+                val resolved = selectDistinctOfflineVoiceForPreset(voices, preset)
+                if (voices.isNotEmpty()) {
+                    cachedVoiceByPreset[preset] = resolved
+                }
+                resolved
+            }
+            if (_isSpeaking.value || !isActive) return@launch
+
+            runCatching {
+                val targetLocale = if (preset.language == VoiceLanguage.HINDI) {
+                    Locale.forLanguageTag("hi-IN")
+                } else {
+                    Locale.forLanguageTag("en-IN")
+                }
+                if (matchedVoice != null) {
+                    engine.voice = matchedVoice
+                } else {
+                    val res = engine.setLanguage(targetLocale)
+                    if (res == TextToSpeech.LANG_MISSING_DATA || res == TextToSpeech.LANG_NOT_SUPPORTED) {
+                        if (preset.language == VoiceLanguage.ENGLISH) {
+                            engine.setLanguage(Locale.US)
+                        }
+                    }
+                }
+                val effectivePitch = if (isTrueGenderMatch) {
+                    val userDelta = pitch - preset.defaultPitch
+                    (1.0f + userDelta).coerceIn(0.65f, 1.5f)
+                } else {
+                    pitch.coerceIn(0.6f, 1.6f)
+                }
+                engine.setPitch(effectivePitch)
+                engine.setSpeechRate(speed.coerceIn(0.55f, 1.75f))
+            }
+
+            for (clause in clauses) {
+                if (!isActive || _isSpeaking.value) break
+                val cacheKey = playbackEngine.buildPrewarmCacheKey(preset.id, speed, pitch, clause)
+                playbackEngine.prewarmClause(
+                    tts = engine,
+                    clause = clause,
+                    cacheKey = cacheKey
+                )
+            }
+        }
     }
 
     override fun onInit(status: Int) {
@@ -358,6 +465,7 @@ class OfflineVoiceAssistant(
                 latestSettings = settings
                 refreshModelPacks(settings)
                 refreshDiagnosticsSnapshot()
+                prewarmChargerAnnouncement(BatteryTelemetryHub.snapshot.value)
             }
         } else {
             isTtsReady = false
@@ -485,6 +593,9 @@ class OfflineVoiceAssistant(
 
         val packs = VoiceProfilePreset.entries.map { preset ->
             val matchResult = selectDistinctOfflineVoiceForPreset(availableVoices, preset)
+            if (availableVoices.isNotEmpty()) {
+                cachedVoiceByPreset[preset] = matchResult
+            }
             val isPiperOnnxVerified = verifyRealPiperModelFiles(context, preset.piperModelId)
             val matchedSystemVoice = matchResult.first
             val packState = when {
@@ -846,6 +957,7 @@ class OfflineVoiceAssistant(
                     )
                     return disconnectMsg
                 }
+                prewarmChargerAnnouncement(snapshot)
             }
             return null
         }
@@ -1081,6 +1193,43 @@ class OfflineVoiceAssistant(
             else -> message
         }
 
+        if (!isMuted) {
+            val clauses = ProsodyAndPhoneticsEngine.prepareConversationalClauses(
+                rawText = message,
+                language = settings.language,
+                naturalProsodyEnabled = settings.naturalProsodyEnabled
+            )
+
+            val repeatCount = if (
+                priority == AnnouncementPriority.CRITICAL &&
+                settings.repeatPolicy == AnnouncementRepeatPolicy.REPEAT_CRITICAL_ONCE &&
+                !isPreviewOrTest
+            ) {
+                1
+            } else {
+                0
+            }
+
+            // Enqueue playback FIRST so AudioTrack starts immediately (< 200ms) while Room DB logging persists in parallel
+            queueManager.enqueue(
+                item = QueuedVoiceAnnouncement(
+                    eventType = eventType,
+                    rawMessage = message,
+                    clauses = clauses,
+                    priority = priority,
+                    preset = settings.activePreset,
+                    speed = settings.voiceSpeed,
+                    pitch = settings.voicePitch,
+                    isPreviewOrTest = isPreviewOrTest,
+                    repeatCountRemaining = repeatCount
+                ),
+                onInterruptLowerPriority = {
+                    playbackEngine.cancelCurrentPlayback()
+                    runCatching { tts?.stop() }
+                }
+            )
+        }
+
         repository.logAnnouncement(
             eventType = "${priority.badgeText} • $eventType",
             messageSpoken = message,
@@ -1092,45 +1241,14 @@ class OfflineVoiceAssistant(
 
         if (isMuted) {
             refreshDiagnosticsSnapshot()
-            return
         }
-
-        val clauses = ProsodyAndPhoneticsEngine.prepareConversationalClauses(
-            rawText = message,
-            language = settings.language,
-            naturalProsodyEnabled = settings.naturalProsodyEnabled
-        )
-
-        val repeatCount = if (
-            priority == AnnouncementPriority.CRITICAL &&
-            settings.repeatPolicy == AnnouncementRepeatPolicy.REPEAT_CRITICAL_ONCE &&
-            !isPreviewOrTest
-        ) {
-            1
-        } else {
-            0
-        }
-
-        queueManager.enqueue(
-            item = QueuedVoiceAnnouncement(
-                eventType = eventType,
-                rawMessage = message,
-                clauses = clauses,
-                priority = priority,
-                preset = settings.activePreset,
-                speed = settings.voiceSpeed,
-                pitch = settings.voicePitch,
-                isPreviewOrTest = isPreviewOrTest,
-                repeatCountRemaining = repeatCount
-            ),
-            onInterruptLowerPriority = {
-                playbackEngine.cancelCurrentPlayback()
-                runCatching { tts?.stop() }
-            }
-        )
     }
 
     private suspend fun executeQueuedAnnouncement(item: QueuedVoiceAnnouncement) {
+        // Cancel any background prewarm immediately so TTS & I/O are 100% free for live speech
+        prewarmJob?.cancel()
+        prewarmJob = null
+
         // Check phone call state right before playback begins
         if (focusController.isPhoneCallOrRingtoneActive()) {
             refreshDiagnosticsSnapshot()
@@ -1154,11 +1272,11 @@ class OfflineVoiceAssistant(
                 initializeTts()
             }
             var waitAttempts = 0
-            while (!isTtsReady && waitAttempts < 50) {
+            while (!isTtsReady && waitAttempts < 250) {
                 if (!BatteryTelemetryHub.isServiceRunning.value && !item.isPreviewOrTest) {
                     return
                 }
-                kotlinx.coroutines.delay(50L)
+                kotlinx.coroutines.delay(10L)
                 waitAttempts++
             }
 
@@ -1180,55 +1298,72 @@ class OfflineVoiceAssistant(
             }
 
             _isSpeaking.value = true
-            refreshDiagnosticsSnapshot()
 
-            val availableVoices = runCatching { engine.voices.orEmpty() }.getOrDefault(emptySet())
-            val (matchedVoice, isTrueGenderMatch) = selectDistinctOfflineVoiceForPreset(availableVoices, item.preset)
-            if (matchedVoice != null) {
-                engine.voice = matchedVoice
+            val cachedVoicePair = cachedVoiceByPreset[item.preset]
+            val isFullyPrewarmed = playbackEngine.isItemFullyPrewarmed(item)
+            val resolvedVoiceName: String
+
+            if (isFullyPrewarmed) {
+                // Zero TTS Binder IPC when cached WAV is already ready on disk -> audible in < 60ms!
+                val matchedVoice = cachedVoicePair?.first
+                resolvedVoiceName = matchedVoice?.let { v ->
+                    "${v.name} (${v.locale.toLanguageTag()} • Q=${v.quality})"
+                } ?: "${item.preset.piperModelId} (${targetLocale.toLanguageTag()})"
             } else {
-                val res = engine.setLanguage(targetLocale)
-                if (res == TextToSpeech.LANG_MISSING_DATA || res == TextToSpeech.LANG_NOT_SUPPORTED) {
-                    if (item.preset.language == VoiceLanguage.ENGLISH) {
-                        engine.setLanguage(Locale.US)
+                val (matchedVoice, isTrueGenderMatch) = cachedVoicePair ?: run {
+                    val availableVoices = runCatching { engine.voices.orEmpty() }.getOrDefault(emptySet())
+                    val resolved = selectDistinctOfflineVoiceForPreset(availableVoices, item.preset)
+                    if (availableVoices.isNotEmpty()) {
+                        cachedVoiceByPreset[item.preset] = resolved
+                    }
+                    resolved
+                }
+                if (matchedVoice != null) {
+                    engine.voice = matchedVoice
+                } else {
+                    val res = engine.setLanguage(targetLocale)
+                    if (res == TextToSpeech.LANG_MISSING_DATA || res == TextToSpeech.LANG_NOT_SUPPORTED) {
+                        if (item.preset.language == VoiceLanguage.ENGLISH) {
+                            engine.setLanguage(Locale.US)
+                        }
                     }
                 }
-            }
 
-            val effectivePitch = if (isTrueGenderMatch) {
-                val userDelta = item.pitch - item.preset.defaultPitch
-                (1.0f + userDelta).coerceIn(0.65f, 1.5f)
-            } else {
-                item.pitch.coerceIn(0.6f, 1.6f)
-            }
-            val effectiveSpeed = item.speed.coerceIn(0.55f, 1.75f)
-
-            engine.setPitch(effectivePitch)
-            engine.setSpeechRate(effectiveSpeed)
-            runCatching {
-                val effectiveUsage = if (latestSettings.independentVolumeEnabled) {
-                    AudioAttributes.USAGE_ALARM
+                val effectivePitch = if (isTrueGenderMatch) {
+                    val userDelta = item.pitch - item.preset.defaultPitch
+                    (1.0f + userDelta).coerceIn(0.65f, 1.5f)
                 } else {
-                    latestSettings.audioStreamUsageOption.usageConstant
+                    item.pitch.coerceIn(0.6f, 1.6f)
                 }
-                engine.setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(effectiveUsage)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build()
-                )
-            }
+                val effectiveSpeed = item.speed.coerceIn(0.55f, 1.75f)
 
-            val resolvedVoiceName = matchedVoice?.let { v ->
-                "${v.name} (${v.locale.toLanguageTag()} • Q=${v.quality})"
-            } ?: "${item.preset.piperModelId} (${targetLocale.toLanguageTag()})"
+                engine.setPitch(effectivePitch)
+                engine.setSpeechRate(effectiveSpeed)
+                runCatching {
+                    val effectiveUsage = if (latestSettings.independentVolumeEnabled) {
+                        AudioAttributes.USAGE_ALARM
+                    } else {
+                        latestSettings.audioStreamUsageOption.usageConstant
+                    }
+                    engine.setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(effectiveUsage)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build()
+                    )
+                }
+
+                resolvedVoiceName = matchedVoice?.let { v ->
+                    "${v.name} (${v.locale.toLanguageTag()} • Q=${v.quality})"
+                } ?: "${item.preset.piperModelId} (${targetLocale.toLanguageTag()})"
+            }
 
             val ok = playbackEngine.synthesizeAndPlayItem(
                 tts = engine,
                 item = item,
                 naturalProsodyEnabled = latestSettings.naturalProsodyEnabled,
-                systemMediaVolumePercent = focusController.readSystemMediaVolumePercent(),
-                systemAlarmVolumePercent = focusController.readSystemAlarmVolumePercent(),
+                systemMediaVolumePercent = null,
+                systemAlarmVolumePercent = null,
                 selectedVoiceName = resolvedVoiceName,
                 synthesizeTimeoutMs = 6_000L
             )

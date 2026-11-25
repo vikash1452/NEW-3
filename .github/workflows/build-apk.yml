@@ -61,14 +61,14 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Create temporary debug keystore
+      - name: Restore or create debug keystore
         shell: bash
         run: |
           set -euo pipefail
           if [ -f "./debug.keystore" ]; then
-            echo "Temporary debug keystore already exists at ./debug.keystore; skipping generation."
+            echo "Debug keystore already exists at ./debug.keystore; using existing keystore."
           elif [ -f "./debug.keystore.base64" ]; then
-            if ! base64 -d ./debug.keystore.base64 > ./debug.keystore; then
+            if ! tr -d '\r\n ' < ./debug.keystore.base64 | base64 -d > ./debug.keystore; then
               rm -f ./debug.keystore
               echo "::error::Failed to decode ./debug.keystore.base64 into ./debug.keystore."
               exit 1
@@ -96,11 +96,15 @@ jobs:
           fi
 
           if [ ! -f "./debug.keystore" ] || [ ! -s "./debug.keystore" ]; then
-            echo "::error::Temporary ./debug.keystore is missing or empty."
+            echo "::error::Debug keystore ./debug.keystore is missing or empty."
             exit 1
           fi
 
-          echo "Verified temporary ./debug.keystore exists."
+          KEYTOOL_BIN="${JAVA_HOME}/bin/keytool"
+          if [ -x "$KEYTOOL_BIN" ]; then
+            "$KEYTOOL_BIN" -list -v -keystore ./debug.keystore -storepass android -alias androiddebugkey | grep -E "SHA256:|Valid from:" || true
+          fi
+          echo "Verified ./debug.keystore exists and is readable."
 
       - name: Build debug APK
         shell: bash

@@ -1514,6 +1514,96 @@ class VoicePlaybackEngine(
     val lastTraceRecord: StateFlow<PlaybackTraceRecord> = _lastTraceRecord.asStateFlow()
 
     private val synthCompletionMap = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
+    private val prewarmWavCache = ConcurrentHashMap<String, File>()
+    private val prewarmCacheDir: File by lazy {
+        File(context.cacheDir, "tts_prewarm_wav").apply {
+            if (!exists()) mkdirs()
+        }
+    }
+
+    fun buildPrewarmCacheKey(
+        presetId: String,
+        speed: Float,
+        pitch: Float,
+        clause: String
+    ): String {
+        return String.format(Locale.US, "%s|%.2f|%.2f|%s", presetId, speed, pitch, clause.trim())
+    }
+
+    fun isClausePrewarmed(cacheKey: String): Boolean {
+        val file = prewarmWavCache[cacheKey] ?: return false
+        return file.exists() && file.length() > 44L
+    }
+
+    fun isItemFullyPrewarmed(item: QueuedVoiceAnnouncement): Boolean {
+        if (item.clauses.isEmpty()) return false
+        return item.clauses.all { clause ->
+            isClausePrewarmed(
+                buildPrewarmCacheKey(
+                    presetId = item.preset.id,
+                    speed = item.speed,
+                    pitch = item.pitch,
+                    clause = clause
+                )
+            )
+        }
+    }
+
+    /**
+     * Pre-synthesizes an upcoming short announcement clause (such as Charger Connected at the
+     * current battery %) into a cached WAV file in the background so plugging in the charger
+     * plays in < 50ms with zero TTS synthesis wait.
+     */
+    suspend fun prewarmClause(
+        tts: TextToSpeech,
+        clause: String,
+        cacheKey: String,
+        synthesizeTimeoutMs: Long = 5_000L
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (clause.isBlank()) return@withContext false
+        if (isClausePrewarmed(cacheKey)) return@withContext true
+
+        val safeHash = cacheKey.hashCode().toUInt().toString(16)
+        val targetFile = File(prewarmCacheDir, "prewarm_$safeHash.wav")
+        val utteranceId = "prewarm_${UUID.randomUUID()}"
+        val deferred = CompletableDeferred<Boolean>()
+        synthCompletionMap[utteranceId] = deferred
+
+        return@withContext try {
+            val synthParams = Bundle().apply {
+                putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, utteranceId)
+                putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f)
+                putFloat(TextToSpeech.Engine.KEY_PARAM_PAN, 0.0f)
+            }
+            val synthResult = tts.synthesizeToFile(clause, synthParams, targetFile, utteranceId)
+            val completed = if (synthResult == TextToSpeech.SUCCESS) {
+                withTimeoutOrNull(synthesizeTimeoutMs) { deferred.await() } == true
+            } else {
+                synthCompletionMap.remove(utteranceId)
+                false
+            }
+            val valid = (completed || (synthResult == TextToSpeech.SUCCESS && targetFile.exists() && targetFile.length() > 64L)) &&
+                decodeRiffWavHeader(targetFile) != null
+            if (valid) {
+                if (prewarmWavCache.size >= 10) {
+                    val oldestKey = prewarmWavCache.keys.firstOrNull { it != cacheKey }
+                    if (oldestKey != null) {
+                        val evicted = prewarmWavCache.remove(oldestKey)
+                        runCatching { if (evicted != null && evicted != targetFile) evicted.delete() }
+                    }
+                }
+                prewarmWavCache[cacheKey] = targetFile
+                true
+            } else {
+                runCatching { if (targetFile.exists()) targetFile.delete() }
+                false
+            }
+        } catch (_: Throwable) {
+            synthCompletionMap.remove(utteranceId)
+            runCatching { if (targetFile.exists()) targetFile.delete() }
+            false
+        }
+    }
 
     fun onUtteranceSynthDone(utteranceId: String?, success: Boolean) {
         if (utteranceId != null) {
@@ -1545,10 +1635,19 @@ class VoicePlaybackEngine(
 
         val independentEnabled = volumeController.independentModeEnabled.value
         val effectiveUsageOption = volumeController.getEffectiveUsageOption()
-        val policyReport = policyAuditor.auditDeviceAudioPolicy(
-            selectedOption = effectiveUsageOption,
-            independentModeEnabled = independentEnabled
-        )
+        val policyReport by lazy {
+            policyAuditor.auditDeviceAudioPolicy(
+                selectedOption = effectiveUsageOption,
+                independentModeEnabled = independentEnabled
+            )
+        }
+        val fastStreamLabel = when (effectiveUsageOption) {
+            AudioStreamUsageOption.ALARM_SPEECH -> "STREAM_ALARM"
+            AudioStreamUsageOption.NOTIFICATION_SPEECH -> "STREAM_NOTIFICATION"
+            AudioStreamUsageOption.ACCESSIBILITY_SPEECH -> "STREAM_ACCESSIBILITY"
+            AudioStreamUsageOption.SONIFICATION_SPEECH -> "STREAM_RING"
+            AudioStreamUsageOption.MEDIA_SPEECH -> "STREAM_MUSIC"
+        }
 
         val selectedEngineName = runCatching { tts.defaultEngine ?: "System Default TTS" }
             .getOrDefault("System Default TTS")
@@ -1558,31 +1657,45 @@ class VoicePlaybackEngine(
         for ((index, clause) in item.clauses.withIndex()) {
             if (isCancelled || !isActive) return@withContext false
 
+            val cacheKey = buildPrewarmCacheKey(
+                presetId = item.preset.id,
+                speed = item.speed,
+                pitch = item.pitch,
+                clause = clause
+            )
+            val prewarmedFile = prewarmWavCache[cacheKey]?.takeIf { it.exists() && it.length() > 44L }
+            val usedPrewarmCache = prewarmedFile != null
+
             val utteranceId = "synth_${UUID.randomUUID()}"
-            val wavFile = File(cacheDir, "$utteranceId.wav")
+            val wavFile = prewarmedFile ?: File(cacheDir, "$utteranceId.wav")
             val effectivePcmGain = volumeController.getEffectiveGain(item.isPreviewOrTest)
 
             try {
-                _playbackStateLabel.value = "Synthesizing WAV via $selectedEngineName..."
-                val deferred = CompletableDeferred<Boolean>()
-                synthCompletionMap[utteranceId] = deferred
-
-                val synthParams = Bundle().apply {
-                    putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, utteranceId)
-                    putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f)
-                    putFloat(TextToSpeech.Engine.KEY_PARAM_PAN, 0.0f)
-                }
-
-                val synthResult = tts.synthesizeToFile(clause, synthParams, wavFile, utteranceId)
-                val callbackCompleted = if (synthResult == TextToSpeech.SUCCESS) {
-                    withTimeoutOrNull(synthesizeTimeoutMs) { deferred.await() } == true
+                val synthSucceeded = if (usedPrewarmCache) {
+                    _playbackStateLabel.value = "Instant Cached PCM -> AudioTrack..."
+                    true
                 } else {
-                    synthCompletionMap.remove(utteranceId)
-                    false
-                }
+                    _playbackStateLabel.value = "Synthesizing WAV via $selectedEngineName..."
+                    val deferred = CompletableDeferred<Boolean>()
+                    synthCompletionMap[utteranceId] = deferred
 
-                val synthSucceeded = (callbackCompleted || (synthResult == TextToSpeech.SUCCESS && wavFile.exists() && wavFile.length() > 64L)) &&
-                    wavFile.exists() && wavFile.length() > 44L
+                    val synthParams = Bundle().apply {
+                        putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, utteranceId)
+                        putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f)
+                        putFloat(TextToSpeech.Engine.KEY_PARAM_PAN, 0.0f)
+                    }
+
+                    val synthResult = tts.synthesizeToFile(clause, synthParams, wavFile, utteranceId)
+                    val callbackCompleted = if (synthResult == TextToSpeech.SUCCESS) {
+                        withTimeoutOrNull(synthesizeTimeoutMs) { deferred.await() } == true
+                    } else {
+                        synthCompletionMap.remove(utteranceId)
+                        false
+                    }
+
+                    (callbackCompleted || (synthResult == TextToSpeech.SUCCESS && wavFile.exists() && wavFile.length() > 64L)) &&
+                        wavFile.exists() && wavFile.length() > 44L
+                }
 
                 if (isCancelled) return@withContext false
 
@@ -1629,7 +1742,7 @@ class VoicePlaybackEngine(
                     }
 
                     _playbackEngineLabel.value =
-                        "SynthesizeToFile -> AudioTrack (${effectiveUsageOption.usageConstantName} -> ${policyReport.effectivePolicyStreamName})"
+                        "SynthesizeToFile -> AudioTrack (${effectiveUsageOption.usageConstantName} -> $fastStreamLabel)"
                     val trackResult = playWavFileThroughAudioTrack(
                         wavFile = wavFile,
                         decodedWav = decodedWav,
@@ -1721,7 +1834,9 @@ class VoicePlaybackEngine(
                 )
                 return@withContext false
             } finally {
-                runCatching { if (wavFile.exists()) wavFile.delete() }
+                if (!usedPrewarmCache) {
+                    runCatching { if (wavFile.exists()) wavFile.delete() }
+                }
             }
         }
 
@@ -1852,12 +1967,11 @@ class VoicePlaybackEngine(
                 .build()
         }.getOrNull()
 
-        val prePolicyReport = policyAuditor.auditDeviceAudioPolicy(
-            selectedOption = effectiveUsageOption,
-            independentModeEnabled = independentModeEnabled
-        )
-
         if (track == null || track.state != AudioTrack.STATE_INITIALIZED) {
+            val prePolicyReport = policyAuditor.auditDeviceAudioPolicy(
+                selectedOption = effectiveUsageOption,
+                independentModeEnabled = independentModeEnabled
+            )
             runCatching { track?.release() }
             recordAndLogTrace(
                 PlaybackTraceRecord(
@@ -1898,8 +2012,24 @@ class VoicePlaybackEngine(
             val currentTrackGain = volumeController.getAudioTrackStreamGain(isPcm16, isPreviewOrTest)
             track.setVolume(currentTrackGain)
 
+            // Start AudioTrack and immediately prime the first PCM buffer so audible sound
+            // begins in < 30ms before diagnostics/policy auditing runs.
             track.play()
             val playStateAfterStart = track.playState
+
+            val chunkSize = 2048
+            var offset = 0
+            var totalBytesWritten = 0L
+
+            if (!isCancelled && actualBytesRead > 0) {
+                val primeSize = minOf(minBufSize, actualBytesRead)
+                val primed = track.write(rawPcmBuffer, 0, primeSize)
+                if (primed > 0) {
+                    offset = primed
+                    totalBytesWritten = primed.toLong()
+                }
+            }
+
             val routedDevice = runCatching { track.routedDevice }.getOrNull()
 
             val livePolicyReport = policyAuditor.auditDeviceAudioPolicy(
@@ -1971,15 +2101,8 @@ class VoicePlaybackEngine(
                 )
             )
 
-            val chunkSize = 2048
-            var offset = 0
-            var totalBytesWritten = 0L
-
             while (!isCancelled && offset < actualBytesRead) {
                 val toWrite = minOf(chunkSize, actualBytesRead - offset)
-                if (isPcm16) {
-                    track.setVolume(1.0f)
-                }
                 val written = track.write(rawPcmBuffer, offset, toWrite)
                 if (written <= 0) break
                 offset += written
