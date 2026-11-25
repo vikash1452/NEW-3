@@ -24,6 +24,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.automirrored.filled.ShowChart
 import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.AppSettingsAlt
 import androidx.compose.material.icons.filled.AutoMode
@@ -39,7 +40,6 @@ import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Shield
-import androidx.compose.material.icons.filled.ShowChart
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.AlertDialog
@@ -71,6 +71,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
@@ -611,7 +612,7 @@ private fun SmartBatteryUsageDashboardCard(
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Icon(
-                        imageVector = Icons.Default.ShowChart,
+                        imageVector = Icons.AutoMirrored.Filled.ShowChart,
                         contentDescription = "Consumption History Graph",
                         tint = EmeraldCharge,
                         modifier = Modifier.size(16.dp)
@@ -684,10 +685,22 @@ private fun SmartBatteryUsageDashboardCard(
                     }
                     val count = graphPercentages.size
                     val path = Path()
+                    val fillPath = Path()
+                    var lastX = w / 2f
+                    var lastY = h / 2f
                     graphPercentages.forEachIndexed { idx, pct ->
                         val x = if (count <= 1) w / 2f else (idx.toFloat() / (count - 1).toFloat()) * w
                         val y = h - ((pct.coerceIn(0, 100) / 100f) * h)
-                        if (idx == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                        lastX = x
+                        lastY = y
+                        if (idx == 0) {
+                            path.moveTo(x, y)
+                            fillPath.moveTo(x, h)
+                            fillPath.lineTo(x, y)
+                        } else {
+                            path.lineTo(x, y)
+                            fillPath.lineTo(x, y)
+                        }
                         drawCircle(
                             color = EmeraldCharge,
                             radius = 3.dp.toPx(),
@@ -695,12 +708,33 @@ private fun SmartBatteryUsageDashboardCard(
                         )
                     }
                     if (count > 1) {
+                        fillPath.lineTo(lastX, h)
+                        fillPath.close()
+                        drawPath(
+                            path = fillPath,
+                            brush = Brush.verticalGradient(
+                                colors = listOf(
+                                    EmeraldCharge.copy(alpha = 0.28f),
+                                    EmeraldCharge.copy(alpha = 0.02f)
+                                )
+                            )
+                        )
                         drawPath(
                             path = path,
                             color = EmeraldCharge,
                             style = Stroke(width = 2.5.dp.toPx(), cap = StrokeCap.Round)
                         )
                     }
+                    drawCircle(
+                        color = EmeraldCharge.copy(alpha = 0.30f),
+                        radius = 6.5.dp.toPx(),
+                        center = Offset(lastX, lastY)
+                    )
+                    drawCircle(
+                        color = Color.White,
+                        radius = 2.2.dp.toPx(),
+                        center = Offset(lastX, lastY)
+                    )
                 }
             }
         }

@@ -1,6 +1,14 @@
 package com.example.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -54,6 +62,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -437,15 +446,26 @@ private fun BatteryHealthSummaryHeroCard(snapshot: BatteryHardwareSnapshot) {
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
+                        val honestyChevronDeg by animateFloatAsState(
+                            targetValue = if (showHonestyDetails) 180f else 0f,
+                            animationSpec = tween(220, easing = FastOutSlowInEasing),
+                            label = "honesty_chevron"
+                        )
                         Icon(
-                            imageVector = if (showHonestyDetails) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                            imageVector = Icons.Default.ExpandMore,
                             contentDescription = "Expand health explanation",
                             tint = ElectricCyan,
-                            modifier = Modifier.size(16.dp)
+                            modifier = Modifier
+                                .size(16.dp)
+                                .graphicsLayer { rotationZ = honestyChevronDeg }
                         )
                     }
 
-                    AnimatedVisibility(visible = showHonestyDetails) {
+                    AnimatedVisibility(
+                        visible = showHonestyDetails,
+                        enter = fadeIn(tween(220)) + expandVertically(tween(220)),
+                        exit = fadeOut(tween(160)) + shrinkVertically(tween(160))
+                    ) {
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             HorizontalDivider(color = NavyCardBorder.copy(alpha = 0.5f))
                             Text(
@@ -767,6 +787,16 @@ private fun CompactHealthMetricCard(
     var localExpanded by rememberSaveable(spec.id) { mutableStateOf(false) }
     val isExpanded = forceExpanded || localExpanded
     val isUnavailable = spec.primaryValue == "N/A"
+    val borderColor by animateColorAsState(
+        targetValue = if (isExpanded) ElectricCyan.copy(alpha = 0.6f) else NavyCardBorder,
+        animationSpec = tween(220),
+        label = "health_card_border_${spec.id}"
+    )
+    val chevronDeg by animateFloatAsState(
+        targetValue = if (isExpanded) 180f else 0f,
+        animationSpec = tween(220, easing = FastOutSlowInEasing),
+        label = "health_card_chevron_${spec.id}"
+    )
 
     Card(
         modifier = modifier
@@ -776,7 +806,7 @@ private fun CompactHealthMetricCard(
         colors = CardDefaults.cardColors(containerColor = NavySurface),
         border = BorderStroke(
             width = 1.dp,
-            color = if (isExpanded) ElectricCyan.copy(alpha = 0.55f) else NavyCardBorder
+            color = borderColor
         )
     ) {
         Column(
@@ -812,10 +842,12 @@ private fun CompactHealthMetricCard(
                     )
                 }
                 Icon(
-                    imageVector = if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    imageVector = Icons.Default.ExpandMore,
                     contentDescription = "Toggle ${spec.title} API details",
-                    tint = TextMuted,
-                    modifier = Modifier.size(15.dp)
+                    tint = if (isExpanded) ElectricCyan else TextMuted,
+                    modifier = Modifier
+                        .size(15.dp)
+                        .graphicsLayer { rotationZ = chevronDeg }
                 )
             }
 
@@ -854,7 +886,11 @@ private fun CompactHealthMetricCard(
             }
 
             // Expandable API Path & Technical Explanation Section
-            AnimatedVisibility(visible = isExpanded) {
+            AnimatedVisibility(
+                visible = isExpanded,
+                enter = fadeIn(tween(220)) + expandVertically(tween(220)),
+                exit = fadeOut(tween(160)) + shrinkVertically(tween(160))
+            ) {
                 Column(
                     modifier = Modifier.padding(top = 4.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
@@ -939,15 +975,26 @@ private fun CompactThermalAndPowerExplanationCard(
                         )
                     }
                 }
+                val thermalChevronDeg by animateFloatAsState(
+                    targetValue = if (expanded) 180f else 0f,
+                    animationSpec = tween(220, easing = FastOutSlowInEasing),
+                    label = "thermal_chevron"
+                )
                 Icon(
-                    imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    imageVector = Icons.Default.ExpandMore,
                     contentDescription = "Expand thermal & power explanation",
                     tint = ElectricCyan,
-                    modifier = Modifier.size(18.dp)
+                    modifier = Modifier
+                        .size(18.dp)
+                        .graphicsLayer { rotationZ = thermalChevronDeg }
                 )
             }
 
-            AnimatedVisibility(visible = expanded) {
+            AnimatedVisibility(
+                visible = expanded,
+                enter = fadeIn(tween(220)) + expandVertically(tween(220)),
+                exit = fadeOut(tween(160)) + shrinkVertically(tween(160))
+            ) {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     HorizontalDivider(color = NavyCardBorder.copy(alpha = 0.5f))
                     Text(
@@ -1026,15 +1073,26 @@ private fun CollapsibleDiagnosticRegistersCard(
                         )
                     }
                 }
+                val regChevronDeg by animateFloatAsState(
+                    targetValue = if (expanded) 180f else 0f,
+                    animationSpec = tween(220, easing = FastOutSlowInEasing),
+                    label = "registers_chevron"
+                )
                 Icon(
-                    imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    imageVector = Icons.Default.ExpandMore,
                     contentDescription = "Toggle complete register list",
                     tint = ElectricCyan,
-                    modifier = Modifier.size(18.dp)
+                    modifier = Modifier
+                        .size(18.dp)
+                        .graphicsLayer { rotationZ = regChevronDeg }
                 )
             }
 
-            AnimatedVisibility(visible = expanded) {
+            AnimatedVisibility(
+                visible = expanded,
+                enter = fadeIn(tween(240)) + expandVertically(tween(240)),
+                exit = fadeOut(tween(180)) + shrinkVertically(tween(180))
+            ) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     metrics.forEachIndexed { idx, metric ->
                         if (idx > 0) {

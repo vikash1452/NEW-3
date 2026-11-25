@@ -4,6 +4,16 @@ import android.content.Intent
 import android.provider.Settings
 import android.speech.tts.TextToSpeech
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -68,6 +78,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -247,11 +258,13 @@ fun VoiceAndAlertsScreen(
                             }
                             context.startActivity(ttsSettingsIntent)
                         }.onFailure {
-                            context.startActivity(
-                                Intent(Settings.ACTION_SETTINGS).apply {
-                                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                                }
-                            )
+                            runCatching {
+                                context.startActivity(
+                                    Intent(Settings.ACTION_SETTINGS).apply {
+                                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                    }
+                                )
+                            }
                         }
                     }
                 }
@@ -437,15 +450,26 @@ private fun VoiceStudioGalleryCard(
                         fontWeight = FontWeight.Bold
                     )
                 }
+                val labChevronDeg by animateFloatAsState(
+                    targetValue = if (showComparisonLab) 180f else 0f,
+                    animationSpec = tween(220, easing = FastOutSlowInEasing),
+                    label = "comparison_lab_chevron"
+                )
                 Icon(
-                    imageVector = if (showComparisonLab) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    imageVector = Icons.Default.ExpandMore,
                     contentDescription = "Toggle Comparison Lab",
                     tint = ElectricCyan,
-                    modifier = Modifier.size(16.dp)
+                    modifier = Modifier
+                        .size(16.dp)
+                        .graphicsLayer { rotationZ = labChevronDeg }
                 )
             }
 
-            AnimatedVisibility(visible = showComparisonLab) {
+            AnimatedVisibility(
+                visible = showComparisonLab,
+                enter = fadeIn(tween(220)) + expandVertically(tween(220)),
+                exit = fadeOut(tween(160)) + shrinkVertically(tween(160))
+            ) {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     FlowRow(
                         modifier = Modifier.fillMaxWidth(),
@@ -590,18 +614,37 @@ private fun CompactVoiceProfileGridCell(
     onPreview: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val cellContainerColor by animateColorAsState(
+        targetValue = if (isSelected) EmeraldCharge.copy(alpha = 0.15f) else NavySurfaceElevated,
+        animationSpec = tween(250),
+        label = "voice_cell_bg_${preset.id}"
+    )
+    val cellBorderColor by animateColorAsState(
+        targetValue = when {
+            isPreviewing -> ElectricCyan
+            isSelected -> EmeraldCharge
+            else -> NavyCardBorder
+        },
+        animationSpec = tween(250),
+        label = "voice_cell_border_${preset.id}"
+    )
+    val cellScale by animateFloatAsState(
+        targetValue = if (isPreviewing) 1.02f else 1f,
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium),
+        label = "voice_cell_scale_${preset.id}"
+    )
+
     Surface(
         shape = RoundedCornerShape(12.dp),
-        color = if (isSelected) EmeraldCharge.copy(alpha = 0.14f) else NavySurfaceElevated,
+        color = cellContainerColor,
         border = BorderStroke(
             width = if (isSelected || isPreviewing) 1.5.dp else 1.dp,
-            color = when {
-                isPreviewing -> ElectricCyan
-                isSelected -> EmeraldCharge
-                else -> NavyCardBorder
-            }
+            color = cellBorderColor
         ),
-        modifier = modifier
+        modifier = modifier.graphicsLayer {
+            scaleX = cellScale
+            scaleY = cellScale
+        }
     ) {
         Column(
             modifier = Modifier
@@ -835,16 +878,27 @@ private fun OfflineVoiceModelManagerCard(
                                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                     )
                                 }
+                                val modelChevronDeg by animateFloatAsState(
+                                    targetValue = if (isExpanded) 180f else 0f,
+                                    animationSpec = tween(220, easing = FastOutSlowInEasing),
+                                    label = "model_chevron_${pack.modelId}"
+                                )
                                 Icon(
-                                    imageVector = if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                    imageVector = Icons.Default.ExpandMore,
                                     contentDescription = "Expand model details",
                                     tint = TextSecondary,
-                                    modifier = Modifier.size(16.dp)
+                                    modifier = Modifier
+                                        .size(16.dp)
+                                        .graphicsLayer { rotationZ = modelChevronDeg }
                                 )
                             }
                         }
 
-                        AnimatedVisibility(visible = isExpanded) {
+                        AnimatedVisibility(
+                            visible = isExpanded,
+                            enter = fadeIn(tween(220)) + expandVertically(tween(220)),
+                            exit = fadeOut(tween(160)) + shrinkVertically(tween(160))
+                        ) {
                             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                 HorizontalDivider(color = NavyCardBorder.copy(alpha = 0.5f))
                                 Text(

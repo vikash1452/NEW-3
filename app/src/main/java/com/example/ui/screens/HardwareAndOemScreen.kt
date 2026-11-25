@@ -4,6 +4,8 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -19,13 +21,13 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.BatterySaver
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeveloperBoard
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Memory
-import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Security
@@ -42,6 +44,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -575,13 +578,15 @@ private fun BackgroundServiceControlCard(
             HorizontalDivider(color = NavyCardBorder)
 
             // Battery Optimization Exemption Status
+            val optBorderColor by animateColorAsState(
+                targetValue = if (isIgnoringBatteryOptimizations) EmeraldCharge.copy(alpha = 0.55f) else AmberWarning.copy(alpha = 0.65f),
+                animationSpec = tween(280),
+                label = "opt_border_color"
+            )
             Surface(
                 shape = RoundedCornerShape(14.dp),
                 color = NavySurfaceElevated,
-                border = BorderStroke(
-                    1.dp,
-                    if (isIgnoringBatteryOptimizations) EmeraldCharge.copy(alpha = 0.5f) else AmberWarning.copy(alpha = 0.6f)
-                )
+                border = BorderStroke(1.dp, optBorderColor)
             ) {
                 Column(
                     modifier = Modifier.padding(12.dp),
@@ -639,7 +644,7 @@ private fun BackgroundServiceControlCard(
                             shape = RoundedCornerShape(10.dp)
                         ) {
                             Icon(
-                                imageVector = Icons.Default.OpenInNew,
+                                imageVector = Icons.AutoMirrored.Filled.OpenInNew,
                                 contentDescription = null,
                                 modifier = Modifier.size(16.dp)
                             )

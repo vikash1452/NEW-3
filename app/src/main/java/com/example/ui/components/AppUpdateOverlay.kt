@@ -1,10 +1,13 @@
 package com.example.ui.components
 
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -35,7 +38,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -80,28 +86,78 @@ fun AppUpdateOverlay(
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val cardScale = remember { Animatable(0.86f) }
+    val cardAlpha = remember { Animatable(0f) }
+    val cardOffsetY = remember { Animatable(40f) }
+
+    LaunchedEffect(Unit) {
+        launch {
+            cardAlpha.animateTo(1f, tween(durationMillis = 260, easing = FastOutSlowInEasing))
+        }
+        launch {
+            cardScale.animateTo(
+                targetValue = 1f,
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                    stiffness = Spring.StiffnessMediumLow
+                )
+            )
+        }
+        launch {
+            cardOffsetY.animateTo(
+                targetValue = 0f,
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioLowBouncy,
+                    stiffness = Spring.StiffnessMediumLow
+                )
+            )
+        }
+    }
+
     val infiniteTransition = rememberInfiniteTransition(label = "update_overlay_motion")
 
     // Gentle floating motion for the 3D rocket
     val rocketFloatOffsetY by infiniteTransition.animateFloat(
-        initialValue = -5f,
+        initialValue = -6f,
         targetValue = 6f,
         animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1_700, easing = FastOutSlowInEasing),
+            animation = tween(durationMillis = 1_650, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse
         ),
         label = "rocket_float_y"
     )
 
+    // Subtle rocket launch hover tilt
+    val rocketTiltDeg by infiniteTransition.animateFloat(
+        initialValue = -2.6f,
+        targetValue = 2.6f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 2_200, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "rocket_tilt_deg"
+    )
+
     // Subtle animated jet flame pulse
     val flamePulse by infiniteTransition.animateFloat(
-        initialValue = 0.88f,
-        targetValue = 1.12f,
+        initialValue = 0.86f,
+        targetValue = 1.16f,
         animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 420, easing = FastOutSlowInEasing),
+            animation = tween(durationMillis = 380, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse
         ),
         label = "rocket_flame_pulse"
+    )
+
+    // Twinkling sparkles in header
+    val sparklePulse by infiniteTransition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 1.0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1_100, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "header_sparkle_pulse"
     )
 
     // Subtle floating drift for decorative pastel circles
@@ -196,7 +252,13 @@ fun AppUpdateOverlay(
                     .windowInsetsPadding(WindowInsets.safeDrawing)
                     .padding(horizontal = 24.dp, vertical = 20.dp)
                     .widthIn(max = 390.dp)
-                    .fillMaxWidth(),
+                    .fillMaxWidth()
+                    .graphicsLayer {
+                        scaleX = cardScale.value
+                        scaleY = cardScale.value
+                        alpha = cardAlpha.value
+                        translationY = cardOffsetY.value
+                    },
                 contentAlignment = Alignment.TopCenter
             ) {
                 // Main White Card (offset down by 54dp so the 3D rocket floats across the top edge)
@@ -264,7 +326,7 @@ fun AppUpdateOverlay(
                                     )
                                 )
 
-                                // Subtle decorative circles inside the yellow wave
+                                // Subtle decorative circles & twinkling sparkles inside the yellow wave
                                 drawCircle(
                                     color = Color.White.copy(alpha = 0.24f),
                                     radius = 18.dp.toPx(),
@@ -276,9 +338,14 @@ fun AppUpdateOverlay(
                                     center = Offset(w * 0.86f, h * 0.42f)
                                 )
                                 drawCircle(
-                                    color = Color.White.copy(alpha = 0.30f),
-                                    radius = 5.dp.toPx(),
+                                    color = Color.White.copy(alpha = 0.28f + 0.35f * sparklePulse),
+                                    radius = (4.dp.toPx() * (0.8f + 0.35f * sparklePulse)),
                                     center = Offset(w * 0.79f, h * 0.24f)
+                                )
+                                drawCircle(
+                                    color = Color.White.copy(alpha = 0.25f + 0.45f * (1.35f - sparklePulse)),
+                                    radius = (3.5.dp.toPx() * (0.85f + 0.3f * (1.35f - sparklePulse))),
+                                    center = Offset(w * 0.25f, h * 0.22f)
                                 )
                             }
                         }
@@ -419,6 +486,7 @@ fun AppUpdateOverlay(
                         .size(134.dp)
                         .graphicsLayer {
                             translationY = rocketFloatOffsetY
+                            rotationZ = rocketTiltDeg
                         }
                         .semantics {
                             contentDescription = rocketDescription

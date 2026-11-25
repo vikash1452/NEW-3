@@ -14,19 +14,26 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
@@ -50,6 +57,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.BatterySaver
 import androidx.compose.material.icons.filled.DeveloperBoard
@@ -58,7 +66,6 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.outlined.BatterySaver
 import androidx.compose.material.icons.outlined.DeveloperBoard
 import androidx.compose.material.icons.outlined.HealthAndSafety
@@ -795,6 +802,34 @@ fun BatteryBossApp(
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val isExpandedScreen = maxWidth >= 600.dp
 
+        val disableAnimations = settings.batterySaverMode.disableAnimations
+        val topBarPulseTransition = rememberInfiniteTransition(label = "topbar_charge_pulse")
+        val rawChargeScale by topBarPulseTransition.animateFloat(
+            initialValue = 0.96f,
+            targetValue = 1.10f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 1_100, easing = FastOutSlowInEasing),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "topbar_logo_scale"
+        )
+        val topBarLogoScale = if (snapshot.isCharging && !disableAnimations) rawChargeScale else 1f
+        val pillContainerColor by animateColorAsState(
+            targetValue = if (snapshot.isCharging) EmeraldCharge.copy(alpha = 0.16f) else NavySurfaceElevated,
+            animationSpec = tween(durationMillis = 300),
+            label = "topbar_pill_bg"
+        )
+        val pillBorderColor by animateColorAsState(
+            targetValue = if (snapshot.isCharging) EmeraldCharge else NavyCardBorder,
+            animationSpec = tween(durationMillis = 300),
+            label = "topbar_pill_border"
+        )
+        val pillTextColor by animateColorAsState(
+            targetValue = if (snapshot.isCharging) EmeraldCharge else TextPrimary,
+            animationSpec = tween(durationMillis = 300),
+            label = "topbar_pill_text"
+        )
+
         Scaffold(
             modifier = Modifier.fillMaxSize(),
             containerColor = ObsidianBackground,
@@ -810,7 +845,12 @@ fun BatteryBossApp(
                                 imageVector = Icons.Default.BatteryChargingFull,
                                 contentDescription = "Battery Boss Logo",
                                 tint = EmeraldCharge,
-                                modifier = Modifier.size(26.dp)
+                                modifier = Modifier
+                                    .size(26.dp)
+                                    .graphicsLayer {
+                                        scaleX = topBarLogoScale
+                                        scaleY = topBarLogoScale
+                                    }
                             )
                             Column {
                                 Text(
@@ -831,47 +871,69 @@ fun BatteryBossApp(
                     },
                     actions = {
                         Surface(
-                            color = if (snapshot.isCharging) EmeraldCharge.copy(alpha = 0.16f) else NavySurfaceElevated,
+                            color = pillContainerColor,
                             shape = RoundedCornerShape(50),
-                            border = BorderStroke(
-                                1.dp,
-                                if (snapshot.isCharging) EmeraldCharge else NavyCardBorder
-                            )
+                            border = BorderStroke(1.dp, pillBorderColor)
                         ) {
                             Row(
                                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
-                                Text(
-                                    text = "${snapshot.percentage}%",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    color = if (snapshot.isCharging) EmeraldCharge else TextPrimary
-                                )
+                                AnimatedContent(
+                                    targetState = snapshot.percentage,
+                                    transitionSpec = {
+                                        if (disableAnimations) {
+                                            fadeIn(tween(0)) togetherWith fadeOut(tween(0))
+                                        } else if (targetState >= initialState) {
+                                            (slideInVertically(tween(220)) { -it / 2 } + fadeIn(tween(220))) togetherWith
+                                                (slideOutVertically(tween(180)) { it / 2 } + fadeOut(tween(180)))
+                                        } else {
+                                            (slideInVertically(tween(220)) { it / 2 } + fadeIn(tween(220))) togetherWith
+                                                (slideOutVertically(tween(180)) { -it / 2 } + fadeOut(tween(180)))
+                                        }
+                                    },
+                                    label = "topbar_pct_roll"
+                                ) { pct ->
+                                    Text(
+                                        text = "$pct%",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = pillTextColor
+                                    )
+                                }
                             }
                         }
                         Spacer(modifier = Modifier.width(4.dp))
-                        if (isSpeaking) {
-                            IconButton(
-                                onClick = { viewModel.stopSpeaking() },
-                                modifier = Modifier.testTag("topbar_stop_button")
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Stop,
-                                    contentDescription = "Stop speaking",
-                                    tint = ThermalCrimson
-                                )
-                            }
-                        } else {
-                            IconButton(
-                                onClick = { viewModel.testVoiceNow() },
-                                modifier = Modifier.testTag("topbar_speak_button")
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.VolumeUp,
-                                    contentDescription = "Speak battery status",
-                                    tint = ElectricCyan
-                                )
+                        AnimatedContent(
+                            targetState = isSpeaking,
+                            transitionSpec = {
+                                (scaleIn(initialScale = 0.78f, animationSpec = tween(200)) + fadeIn(tween(200))) togetherWith
+                                    (scaleOut(targetScale = 0.78f, animationSpec = tween(160)) + fadeOut(tween(160)))
+                            },
+                            label = "topbar_speak_toggle"
+                        ) { speaking ->
+                            if (speaking) {
+                                IconButton(
+                                    onClick = { viewModel.stopSpeaking() },
+                                    modifier = Modifier.testTag("topbar_stop_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Stop,
+                                        contentDescription = "Stop speaking",
+                                        tint = ThermalCrimson
+                                    )
+                                }
+                            } else {
+                                IconButton(
+                                    onClick = { viewModel.testVoiceNow() },
+                                    modifier = Modifier.testTag("topbar_speak_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.VolumeUp,
+                                        contentDescription = "Speak battery status",
+                                        tint = ElectricCyan
+                                    )
+                                }
                             }
                         }
                     },
@@ -888,6 +950,14 @@ fun BatteryBossApp(
                     ) {
                         BatteryBossTab.entries.forEach { tab ->
                             val selected = currentTab == tab
+                            val iconScale by animateFloatAsState(
+                                targetValue = if (selected && !disableAnimations) 1.14f else 1f,
+                                animationSpec = spring(
+                                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                                    stiffness = Spring.StiffnessMedium
+                                ),
+                                label = "bottom_nav_scale_${tab.routeId}"
+                            )
                             NavigationBarItem(
                                 selected = selected,
                                 onClick = {
@@ -899,7 +969,11 @@ fun BatteryBossApp(
                                 icon = {
                                     Icon(
                                         imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
-                                        contentDescription = tab.label
+                                        contentDescription = tab.label,
+                                        modifier = Modifier.graphicsLayer {
+                                            scaleX = iconScale
+                                            scaleY = iconScale
+                                        }
                                     )
                                 },
                                 label = {
@@ -936,6 +1010,14 @@ fun BatteryBossApp(
                     ) {
                         BatteryBossTab.entries.forEach { tab ->
                             val selected = currentTab == tab
+                            val railIconScale by animateFloatAsState(
+                                targetValue = if (selected && !disableAnimations) 1.14f else 1f,
+                                animationSpec = spring(
+                                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                                    stiffness = Spring.StiffnessMedium
+                                ),
+                                label = "rail_nav_scale_${tab.routeId}"
+                            )
                             NavigationRailItem(
                                 selected = selected,
                                 onClick = {
@@ -947,7 +1029,11 @@ fun BatteryBossApp(
                                 icon = {
                                     Icon(
                                         imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
-                                        contentDescription = tab.label
+                                        contentDescription = tab.label,
+                                        modifier = Modifier.graphicsLayer {
+                                            scaleX = railIconScale
+                                            scaleY = railIconScale
+                                        }
                                     )
                                 },
                                 label = { Text(tab.label) },
@@ -964,11 +1050,29 @@ fun BatteryBossApp(
                     }
                 }
 
-                val contentModifier = Modifier
-                    .weight(1f)
-                    .fillMaxHeight()
+                val contentModifier = Modifier.fillMaxSize()
 
-                when (currentTab) {
+                AnimatedContent(
+                    targetState = currentTab,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
+                    transitionSpec = {
+                        if (disableAnimations) {
+                            fadeIn(tween(0)) togetherWith fadeOut(tween(0))
+                        } else {
+                            val movingRight = targetState.ordinal >= initialState.ordinal
+                            val slideOffset = if (movingRight) 48 else -48
+                            (fadeIn(tween(220, easing = FastOutSlowInEasing)) +
+                                slideInHorizontally(tween(240, easing = FastOutSlowInEasing)) { slideOffset } +
+                                scaleIn(initialScale = 0.985f, animationSpec = tween(220))) togetherWith
+                                (fadeOut(tween(160, easing = FastOutSlowInEasing)) +
+                                    slideOutHorizontally(tween(180, easing = FastOutSlowInEasing)) { -slideOffset / 2 })
+                        }
+                    },
+                    label = "tab_screen_transition"
+                ) { activeTab ->
+                    when (activeTab) {
                     BatteryBossTab.DASHBOARD -> DashboardScreen(
                         snapshot = snapshot,
                         telemetryHistory = telemetryHistory,
@@ -1191,6 +1295,7 @@ fun BatteryBossApp(
                         onClearHistory = { viewModel.clearAllHistory() },
                         modifier = contentModifier
                     )
+                    }
                 }
             }
         }

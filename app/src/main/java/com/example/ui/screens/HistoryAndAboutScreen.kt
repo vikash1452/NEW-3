@@ -1,5 +1,8 @@
 package com.example.ui.screens
 
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -15,13 +18,13 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.EvStation
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.VerifiedUser
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -33,6 +36,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -320,8 +324,13 @@ private fun SessionItemRow(session: ChargingSessionEntity) {
                 }
             }
 
+            val animatedSessionProgress by animateFloatAsState(
+                targetValue = (session.endPercentage.coerceIn(0, 100)) / 100f,
+                animationSpec = tween(durationMillis = 550, easing = FastOutSlowInEasing),
+                label = "session_progress_${session.id}"
+            )
             LinearProgressIndicator(
-                progress = { (session.endPercentage.coerceIn(0, 100)) / 100f },
+                progress = { animatedSessionProgress },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(6.dp)
@@ -450,7 +459,7 @@ private fun AnnouncementLogsCard(
                         }
                         IconButton(onClick = { onReplayAnnouncement(log.messageSpoken) }) {
                             Icon(
-                                imageVector = Icons.Default.VolumeUp,
+                                imageVector = Icons.AutoMirrored.Filled.VolumeUp,
                                 contentDescription = "Replay announcement",
                                 tint = EmeraldCharge
                             )

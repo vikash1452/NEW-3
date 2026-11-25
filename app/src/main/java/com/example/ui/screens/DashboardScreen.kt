@@ -1,13 +1,25 @@
 package com.example.ui.screens
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -28,20 +40,19 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ShowChart
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.BatteryFull
 import androidx.compose.material.icons.filled.BatteryStd
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.ElectricBolt
-import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.HealthAndSafety
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.ShowChart
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Thermostat
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -58,6 +69,9 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -68,6 +82,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
@@ -92,7 +108,10 @@ import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.ThermalCrimson
 import java.util.Locale
+import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.sin
 
 @Composable
 fun DashboardScreen(
@@ -133,6 +152,7 @@ fun DashboardScreen(
                 monitoringMode = settings.backgroundMonitoringMode,
                 silentNotificationEnabled = settings.silentNotificationEnabled,
                 isCharging = snapshot.isCharging,
+                disableAnimations = settings.batterySaverMode.disableAnimations,
                 voiceAnnouncementsEnabled = settings.voiceAnnouncementsEnabled,
                 engineStatusText = engineStatusText,
                 onToggleMonitoring = onToggleMonitoring,
@@ -157,7 +177,11 @@ fun DashboardScreen(
 
         // 3. Last Spoken Voice Announcement Banner (if any)
         item {
-            AnimatedVisibility(visible = !lastSpokenBanner.isNullOrBlank()) {
+            AnimatedVisibility(
+                visible = !lastSpokenBanner.isNullOrBlank(),
+                enter = fadeIn(tween(240)) + expandVertically(tween(240)),
+                exit = fadeOut(tween(180)) + shrinkVertically(tween(180))
+            ) {
                 LastSpokenAlertCard(
                     message = lastSpokenBanner.orEmpty(),
                     activePresetTitle = "${settings.activePreset.title} (${settings.activePreset.personaName})",
@@ -180,14 +204,18 @@ fun DashboardScreen(
 
         // 5. Live Charging Power Meter & Speed Analysis Card
         item {
-            ChargingPowerMeterCard(snapshot = snapshot)
+            ChargingPowerMeterCard(
+                snapshot = snapshot,
+                disableAnimations = settings.batterySaverMode.disableAnimations
+            )
         }
 
         // 6. Real-Time Charging History Graph (Battery % & Power W Curve)
         item {
             ChargingHistoryGraphCard(
                 snapshot = snapshot,
-                historyPoints = telemetryHistory
+                historyPoints = telemetryHistory,
+                disableAnimations = settings.batterySaverMode.disableAnimations
             )
         }
 
@@ -226,6 +254,7 @@ private fun HeroTelemetryCard(
     monitoringMode: BackgroundMonitoringMode,
     silentNotificationEnabled: Boolean,
     isCharging: Boolean,
+    disableAnimations: Boolean = false,
     voiceAnnouncementsEnabled: Boolean,
     engineStatusText: String,
     onToggleMonitoring: (Boolean) -> Unit,
@@ -242,13 +271,35 @@ private fun HeroTelemetryCard(
         else -> "Battery Boss Active • $percentage% (STANDARD FGS)"
     }
 
+    var refreshSpinCount by remember { mutableIntStateOf(0) }
+    val refreshRotation by animateFloatAsState(
+        targetValue = refreshSpinCount * 360f,
+        animationSpec = tween(durationMillis = if (disableAnimations) 0 else 520, easing = FastOutSlowInEasing),
+        label = "hero_refresh_spin"
+    )
+    val heroBorderColor by animateColorAsState(
+        targetValue = if (isCharging) EmeraldCharge.copy(alpha = 0.55f) else NavyCardBorder,
+        animationSpec = tween(durationMillis = 320),
+        label = "hero_border_color"
+    )
+    val beaconTransition = rememberInfiniteTransition(label = "hero_beacon_pulse")
+    val rawBeaconPulse by beaconTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1_500, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "hero_beacon_wave"
+    )
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .testTag("hero_telemetry_card"),
         shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(containerColor = NavySurface),
-        border = BorderStroke(1.dp, if (isCharging) EmeraldCharge.copy(alpha = 0.5f) else NavyCardBorder)
+        border = BorderStroke(1.dp, heroBorderColor)
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
             Box(modifier = Modifier.fillMaxWidth()) {
@@ -290,11 +341,30 @@ private fun HeroTelemetryCard(
                             modifier = Modifier.weight(1f)
                         ) {
                             Box(
-                                modifier = Modifier
-                                    .size(10.dp)
-                                    .clip(CircleShape)
-                                    .background(if (isServiceRunning) EmeraldCharge else AmberWarning)
-                            )
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier.size(18.dp)
+                            ) {
+                                if (isServiceRunning && !disableAnimations) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(18.dp)
+                                            .graphicsLayer {
+                                                val s = 0.6f + rawBeaconPulse * 0.9f
+                                                scaleX = s
+                                                scaleY = s
+                                                alpha = (1f - rawBeaconPulse) * 0.7f
+                                            }
+                                            .clip(CircleShape)
+                                            .background(EmeraldCharge)
+                                    )
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .size(10.dp)
+                                        .clip(CircleShape)
+                                        .background(if (isServiceRunning) EmeraldCharge else AmberWarning)
+                                )
+                            }
                             Text(
                                 text = statusHeadline,
                                 style = MaterialTheme.typography.labelLarge,
@@ -306,13 +376,19 @@ private fun HeroTelemetryCard(
                         }
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             IconButton(
-                                onClick = onRefreshTelemetry,
+                                onClick = {
+                                    refreshSpinCount += 1
+                                    onRefreshTelemetry()
+                                },
                                 modifier = Modifier.testTag("refresh_telemetry_button")
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.Refresh,
                                     contentDescription = "Refresh battery telemetry",
-                                    tint = TextSecondary
+                                    tint = ElectricCyan,
+                                    modifier = Modifier.graphicsLayer {
+                                        rotationZ = refreshRotation
+                                    }
                                 )
                             }
                             Switch(
@@ -518,28 +594,62 @@ private fun RadialBatteryCoreCard(
     val targetSweep = (snapshot.percentage.coerceIn(0, 100) / 100f) * 280f
     val animatedSweep by animateFloatAsState(
         targetValue = targetSweep,
-        animationSpec = tween(durationMillis = if (disableAnimations) 0 else 700, easing = FastOutSlowInEasing),
+        animationSpec = tween(durationMillis = if (disableAnimations) 0 else 750, easing = FastOutSlowInEasing),
         label = "battery_sweep"
     )
 
     val infiniteTransition = rememberInfiniteTransition(label = "charging_pulse")
     val rawPulseAlpha by infiniteTransition.animateFloat(
         initialValue = 0.25f,
-        targetValue = 0.85f,
+        targetValue = 0.88f,
         animationSpec = infiniteRepeatable(
-            animation = tween(1200, easing = FastOutSlowInEasing),
+            animation = tween(1_250, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse
         ),
         label = "pulse_alpha"
     )
-    val pulseAlpha = if (disableAnimations) 0.35f else rawPulseAlpha
+    val rawInnerOrbitDeg by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 4_200, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "inner_orbit_deg"
+    )
+    val rawIconBreath by infiniteTransition.animateFloat(
+        initialValue = 0.94f,
+        targetValue = 1.12f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1_100, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "icon_breath_scale"
+    )
+    val rawEqWave by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 560, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "eq_wave_phase"
+    )
 
-    val primaryRingColor = when {
+    val pulseAlpha = if (disableAnimations) 0.35f else rawPulseAlpha
+    val iconScale = if (snapshot.isCharging && !disableAnimations) rawIconBreath else 1f
+
+    val targetRingColor = when {
         snapshot.temperatureCelsius != null && snapshot.temperatureCelsius >= 43f -> ThermalCrimson
         snapshot.isCharging -> EmeraldCharge
         snapshot.percentage <= 20 -> AmberWarning
         else -> ElectricCyan
     }
+    val primaryRingColor by animateColorAsState(
+        targetValue = targetRingColor,
+        animationSpec = tween(durationMillis = 400),
+        label = "primary_ring_color"
+    )
 
     Card(
         modifier = Modifier
@@ -547,7 +657,10 @@ private fun RadialBatteryCoreCard(
             .testTag("radial_battery_card"),
         shape = RoundedCornerShape(24.dp),
         colors = CardDefaults.cardColors(containerColor = NavySurface),
-        border = BorderStroke(1.dp, NavyCardBorder)
+        border = BorderStroke(
+            1.dp,
+            if (snapshot.isCharging) primaryRingColor.copy(alpha = 0.42f) else NavyCardBorder
+        )
     ) {
         Column(
             modifier = Modifier
@@ -557,26 +670,71 @@ private fun RadialBatteryCoreCard(
         ) {
             Box(
                 contentAlignment = Alignment.Center,
-                modifier = Modifier.size(228.dp)
+                modifier = Modifier.size(234.dp)
             ) {
                 Canvas(modifier = Modifier.fillMaxSize()) {
                     val strokeWidth = 18.dp.toPx()
-                    val diameter = size.minDimension - strokeWidth * 1.4f
+                    val diameter = size.minDimension - strokeWidth * 1.6f
                     val topLeft = Offset((size.width - diameter) / 2f, (size.height - diameter) / 2f)
                     val arcSize = Size(diameter, diameter)
+                    val center = Offset(size.width / 2f, size.height / 2f)
+                    val radius = diameter / 2f
 
+                    // Subtle ambient core radial glow
+                    drawCircle(
+                        brush = Brush.radialGradient(
+                            colors = listOf(
+                                primaryRingColor.copy(alpha = if (snapshot.isCharging) 0.14f * pulseAlpha else 0.07f),
+                                Color.Transparent
+                            ),
+                            center = center,
+                            radius = radius * 1.05f
+                        ),
+                        radius = radius * 1.05f,
+                        center = center
+                    )
+
+                    // Rotating subtle inner orbital scan arc when charging
+                    if (snapshot.isCharging && !disableAnimations) {
+                        val innerDiameter = diameter - strokeWidth * 2.1f
+                        val innerTopLeft = Offset(
+                            (size.width - innerDiameter) / 2f,
+                            (size.height - innerDiameter) / 2f
+                        )
+                        rotate(degrees = rawInnerOrbitDeg, pivot = center) {
+                            drawArc(
+                                brush = Brush.sweepGradient(
+                                    colors = listOf(
+                                        Color.Transparent,
+                                        primaryRingColor.copy(alpha = 0.55f),
+                                        ElectricCyan.copy(alpha = 0.8f),
+                                        Color.Transparent
+                                    )
+                                ),
+                                startAngle = 0f,
+                                sweepAngle = 110f,
+                                useCenter = false,
+                                topLeft = innerTopLeft,
+                                size = Size(innerDiameter, innerDiameter),
+                                style = Stroke(width = 2.5.dp.toPx(), cap = StrokeCap.Round)
+                            )
+                        }
+                    }
+
+                    // Outer charging halo glow
                     if (snapshot.isCharging) {
                         drawArc(
-                            color = primaryRingColor.copy(alpha = pulseAlpha * 0.28f),
+                            color = primaryRingColor.copy(alpha = pulseAlpha * 0.30f),
                             startAngle = 130f,
                             sweepAngle = 280f,
                             useCenter = false,
                             topLeft = topLeft,
                             size = arcSize,
-                            style = Stroke(width = strokeWidth * 1.65f, cap = StrokeCap.Round)
+                            style = Stroke(width = strokeWidth * 1.7f, cap = StrokeCap.Round)
                         )
                     }
 
+                    // Inactive gauge track
                     drawArc(
                         color = Color(0xFF1C2840),
                         startAngle = 130f,
@@ -587,21 +745,40 @@ private fun RadialBatteryCoreCard(
                         style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
                     )
 
+                    // Active charge sweep arc
+                    val sweep = animatedSweep.coerceAtLeast(4f)
                     drawArc(
                         brush = Brush.sweepGradient(
                             colors = listOf(
-                                primaryRingColor.copy(alpha = 0.75f),
+                                primaryRingColor.copy(alpha = 0.78f),
                                 primaryRingColor,
                                 ElectricCyan,
                                 primaryRingColor
                             )
                         ),
                         startAngle = 130f,
-                        sweepAngle = animatedSweep.coerceAtLeast(4f),
+                        sweepAngle = sweep,
                         useCenter = false,
                         topLeft = topLeft,
                         size = arcSize,
                         style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
+                    )
+
+                    // Glowing live comet spark at the leading tip of the arc
+                    val tipAngleRad = ((130f + sweep) * PI / 180.0)
+                    val tipCenter = Offset(
+                        x = center.x + (radius * cos(tipAngleRad)).toFloat(),
+                        y = center.y + (radius * sin(tipAngleRad)).toFloat()
+                    )
+                    drawCircle(
+                        color = ElectricCyan.copy(alpha = 0.35f + 0.30f * pulseAlpha),
+                        radius = strokeWidth * 0.72f,
+                        center = tipCenter
+                    )
+                    drawCircle(
+                        color = Color.White,
+                        radius = strokeWidth * 0.28f,
+                        center = tipCenter
                     )
                 }
 
@@ -617,14 +794,35 @@ private fun RadialBatteryCoreCard(
                         },
                         contentDescription = snapshot.statusLabel,
                         tint = primaryRingColor,
-                        modifier = Modifier.size(28.dp)
+                        modifier = Modifier
+                            .size(28.dp)
+                            .graphicsLayer {
+                                scaleX = iconScale
+                                scaleY = iconScale
+                            }
                     )
-                    Text(
-                        text = "${snapshot.percentage}%",
-                        style = MaterialTheme.typography.displayLarge,
-                        color = TextPrimary,
-                        modifier = Modifier.testTag("battery_percentage_text")
-                    )
+                    AnimatedContent(
+                        targetState = snapshot.percentage,
+                        transitionSpec = {
+                            if (disableAnimations) {
+                                fadeIn(tween(0)) togetherWith fadeOut(tween(0))
+                            } else if (targetState >= initialState) {
+                                (slideInVertically(tween(260)) { -it / 3 } + fadeIn(tween(260))) togetherWith
+                                    (slideOutVertically(tween(200)) { it / 3 } + fadeOut(tween(200)))
+                            } else {
+                                (slideInVertically(tween(260)) { it / 3 } + fadeIn(tween(260))) togetherWith
+                                    (slideOutVertically(tween(200)) { -it / 3 } + fadeOut(tween(200)))
+                            }
+                        },
+                        label = "radial_pct_roll"
+                    ) { pct ->
+                        Text(
+                            text = "$pct%",
+                            style = MaterialTheme.typography.displayLarge,
+                            color = TextPrimary,
+                            modifier = Modifier.testTag("battery_percentage_text")
+                        )
+                    }
                     Surface(
                         color = primaryRingColor.copy(alpha = 0.16f),
                         shape = RoundedCornerShape(50),
@@ -688,7 +886,8 @@ private fun RadialBatteryCoreCard(
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Button(
                     onClick = onSpeakStatusNow,
@@ -702,11 +901,19 @@ private fun RadialBatteryCoreCard(
                         contentColor = Color(0xFF00210E)
                     )
                 ) {
-                    Icon(
-                        imageVector = if (isSpeaking) Icons.Default.GraphicEq else Icons.Default.VolumeUp,
-                        contentDescription = "Speak battery status",
-                        modifier = Modifier.size(20.dp)
-                    )
+                    if (isSpeaking && !disableAnimations) {
+                        LiveVoiceEqualizerIcon(
+                            phase = rawEqWave,
+                            tint = Color(0xFF00210E),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.VolumeUp,
+                            contentDescription = "Speak battery status",
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         text = if (isSpeaking) "SPEAKING BOSS BRIEFING..." else "ANNOUNCE STATUS NOW",
@@ -714,7 +921,11 @@ private fun RadialBatteryCoreCard(
                     )
                 }
 
-                if (isSpeaking) {
+                AnimatedVisibility(
+                    visible = isSpeaking,
+                    enter = fadeIn(tween(200)) + expandHorizontally(tween(220)),
+                    exit = fadeOut(tween(160)) + shrinkHorizontally(tween(180))
+                ) {
                     OutlinedButton(
                         onClick = onStopSpeaking,
                         modifier = Modifier
@@ -738,9 +949,57 @@ private fun RadialBatteryCoreCard(
 }
 
 @Composable
-private fun ChargingPowerMeterCard(snapshot: BatteryHardwareSnapshot) {
+private fun LiveVoiceEqualizerIcon(
+    phase: Float,
+    tint: Color,
+    modifier: Modifier = Modifier
+) {
+    Canvas(modifier = modifier) {
+        val barCount = 4
+        val gap = size.width * 0.10f
+        val barWidth = (size.width - gap * (barCount - 1)) / barCount
+        val heights = listOf(
+            0.35f + 0.60f * phase,
+            0.92f - 0.55f * phase,
+            0.45f + 0.50f * (1f - phase),
+            0.80f - 0.45f * (1f - phase)
+        )
+        heights.forEachIndexed { idx, frac ->
+            val h = size.height * frac.coerceIn(0.22f, 1f)
+            val x = idx * (barWidth + gap) + barWidth / 2f
+            val topY = (size.height - h) / 2f
+            drawLine(
+                color = tint,
+                start = Offset(x, topY),
+                end = Offset(x, topY + h),
+                strokeWidth = barWidth,
+                cap = StrokeCap.Round
+            )
+        }
+    }
+}
+
+@Composable
+private fun ChargingPowerMeterCard(
+    snapshot: BatteryHardwareSnapshot,
+    disableAnimations: Boolean = false
+) {
     val watts = snapshot.powerWatts?.let { abs(it) }
-    val normalizedProgress = ((watts ?: 0f) / 35f).coerceIn(0f, 1f)
+    val targetProgress = ((watts ?: 0f) / 35f).coerceIn(0f, 1f)
+    val animatedProgress by animateFloatAsState(
+        targetValue = targetProgress,
+        animationSpec = tween(durationMillis = if (disableAnimations) 0 else 600, easing = FastOutSlowInEasing),
+        label = "power_meter_progress"
+    )
+    val animatedBarColor by animateColorAsState(
+        targetValue = when {
+            (watts ?: 0f) >= 15f -> EmeraldCharge
+            (watts ?: 0f) >= 5f -> ElectricCyan
+            else -> AmberWarning
+        },
+        animationSpec = tween(durationMillis = 350),
+        label = "power_meter_color"
+    )
     val rateText = snapshot.percentPerHourRate?.let {
         String.format(Locale.US, "%.1f %%/hr", it)
     } ?: "N/A"
@@ -789,21 +1048,17 @@ private fun ChargingPowerMeterCard(snapshot: BatteryHardwareSnapshot) {
                 Text(
                     text = watts?.let { String.format(Locale.US, "%.2f W", it) } ?: "N/A",
                     style = MaterialTheme.typography.headlineMedium,
-                    color = if (watts != null) EmeraldCharge else TextSecondary
+                    color = if (watts != null) animatedBarColor else TextSecondary
                 )
             }
 
             LinearProgressIndicator(
-                progress = { normalizedProgress },
+                progress = { animatedProgress },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(10.dp)
                     .clip(RoundedCornerShape(50)),
-                color = when {
-                    (watts ?: 0f) >= 15f -> EmeraldCharge
-                    (watts ?: 0f) >= 5f -> ElectricCyan
-                    else -> AmberWarning
-                },
+                color = animatedBarColor,
                 trackColor = NavySurfaceElevated
             )
 
@@ -847,7 +1102,8 @@ private fun ChargingPowerMeterCard(snapshot: BatteryHardwareSnapshot) {
 @Composable
 private fun ChargingHistoryGraphCard(
     snapshot: BatteryHardwareSnapshot,
-    historyPoints: List<TelemetrySamplePoint>
+    historyPoints: List<TelemetrySamplePoint>,
+    disableAnimations: Boolean = false
 ) {
     val points = if (historyPoints.isEmpty()) {
         listOf(
@@ -862,6 +1118,18 @@ private fun ChargingHistoryGraphCard(
     } else {
         historyPoints
     }
+
+    val liveDotTransition = rememberInfiniteTransition(label = "graph_live_dot")
+    val rawDotPulse by liveDotTransition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1_200, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "graph_dot_pulse"
+    )
+    val dotPulse = if (disableAnimations) 0.5f else rawDotPulse
 
     Card(
         modifier = Modifier
@@ -887,7 +1155,7 @@ private fun ChargingHistoryGraphCard(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Icon(
-                        imageVector = Icons.Default.ShowChart,
+                        imageVector = Icons.AutoMirrored.Filled.ShowChart,
                         contentDescription = "Charging History Graph",
                         tint = ElectricCyan
                     )
@@ -935,19 +1203,27 @@ private fun ChargingHistoryGraphCard(
 
                     val count = points.size
                     val pathPct = Path()
+                    val fillPct = Path()
                     val pathTemp = Path()
+                    var lastX = w / 2f
+                    var lastYPct = h / 2f
 
                     points.forEachIndexed { idx, pt ->
                         val x = if (count <= 1) w / 2f else (idx.toFloat() / (count - 1).toFloat()) * w
                         val yPct = h - ((pt.percentage.coerceIn(0, 100) / 100f) * h)
                         val tempVal = (pt.temperatureCelsius ?: 30f).coerceIn(15f, 50f)
                         val yTemp = h - (((tempVal - 15f) / 35f) * h)
+                        lastX = x
+                        lastYPct = yPct
 
                         if (idx == 0) {
                             pathPct.moveTo(x, yPct)
+                            fillPct.moveTo(x, h)
+                            fillPct.lineTo(x, yPct)
                             pathTemp.moveTo(x, yTemp)
                         } else {
                             pathPct.lineTo(x, yPct)
+                            fillPct.lineTo(x, yPct)
                             pathTemp.lineTo(x, yTemp)
                         }
 
@@ -959,6 +1235,17 @@ private fun ChargingHistoryGraphCard(
                     }
 
                     if (count > 1) {
+                        fillPct.lineTo(lastX, h)
+                        fillPct.close()
+                        drawPath(
+                            path = fillPct,
+                            brush = Brush.verticalGradient(
+                                colors = listOf(
+                                    EmeraldCharge.copy(alpha = 0.28f),
+                                    EmeraldCharge.copy(alpha = 0.02f)
+                                )
+                            )
+                        )
                         drawPath(
                             path = pathPct,
                             color = EmeraldCharge,
@@ -970,6 +1257,18 @@ private fun ChargingHistoryGraphCard(
                             style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round)
                         )
                     }
+
+                    // Glowing live telemetry beacon on the newest sample
+                    drawCircle(
+                        color = EmeraldCharge.copy(alpha = 0.28f * dotPulse),
+                        radius = (7.dp.toPx() * (0.85f + 0.35f * dotPulse)),
+                        center = Offset(lastX, lastYPct)
+                    )
+                    drawCircle(
+                        color = Color.White,
+                        radius = 2.4.dp.toPx(),
+                        center = Offset(lastX, lastYPct)
+                    )
                 }
             }
         }
@@ -984,11 +1283,16 @@ private fun LastSpokenAlertCard(
     onReplay: () -> Unit,
     onStop: () -> Unit
 ) {
+    val borderColor by animateColorAsState(
+        targetValue = if (isSpeaking) ElectricCyan else PurpleVoiceAccent.copy(alpha = 0.55f),
+        animationSpec = tween(durationMillis = 300),
+        label = "last_spoken_border"
+    )
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = NavySurfaceElevated),
-        border = BorderStroke(1.dp, PurpleVoiceAccent.copy(alpha = 0.5f))
+        border = BorderStroke(1.dp, borderColor)
     ) {
         Row(
             modifier = Modifier
@@ -1001,7 +1305,7 @@ private fun LastSpokenAlertCard(
                 Text(
                     text = if (isSpeaking) "SPEAKING NOW • $activePresetTitle" else "LAST VOICE ANNOUNCEMENT • $activePresetTitle",
                     style = MaterialTheme.typography.labelSmall,
-                    color = PurpleVoiceAccent
+                    color = if (isSpeaking) ElectricCyan else PurpleVoiceAccent
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
@@ -1022,7 +1326,7 @@ private fun LastSpokenAlertCard(
             } else {
                 IconButton(onClick = onReplay) {
                     Icon(
-                        imageVector = Icons.Default.VolumeUp,
+                        imageVector = Icons.AutoMirrored.Filled.VolumeUp,
                         contentDescription = "Replay voice announcement",
                         tint = EmeraldCharge
                     )
