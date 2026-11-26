@@ -256,13 +256,13 @@ class UpdateRepositoryTest {
                 UpdateLockManager.setUpdateLockForTest(
                     context = context,
                     active = true,
-                    version = "2.0",
+                    version = "3.0",
                     releaseDateMillis = System.currentTimeMillis() + 86_400_000L
                 )
                 assertFalse(UpdateLockManager.isUpdateLockActive(context))
 
                 // 3. Update active (releaseDateMillis == 0L): charger connect speaks ONLY hidden update voice
-                UpdateLockManager.setUpdateLockForTest(context, active = true, version = "2.0", releaseDateMillis = 0L)
+                UpdateLockManager.setUpdateLockForTest(context, active = true, version = "3.0", releaseDateMillis = 0L)
                 voice.resetAnnouncementTrackingState()
                 val lockedConnectMsg = voice.evaluateSnapshotAndAnnounceNow(
                     snapshot = pluggedSnapshot,
