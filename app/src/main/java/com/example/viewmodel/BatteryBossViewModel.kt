@@ -78,6 +78,10 @@ class BatteryBossViewModel(application: Application) : AndroidViewModel(applicat
     val audioDiagnostics: StateFlow<AudioDiagnosticsState> = voiceAssistant.audioDiagnostics
     val notificationChannelDiagnostics: StateFlow<NotificationChannelDiagnostics> =
         BatteryTelemetryHub.notificationChannelDiagnostics
+    val isAccessibilityRadioHelperEnabled: StateFlow<Boolean> =
+        BatteryTelemetryHub.isAccessibilityRadioHelperEnabled
+    val lastRadioAutomationStatus: StateFlow<String> =
+        BatteryTelemetryHub.lastRadioAutomationStatus
 
     val userSettings: StateFlow<UserSettings> = settingsDataStore.settingsFlow.stateIn(
         scope = viewModelScope,
@@ -134,6 +138,7 @@ class BatteryBossViewModel(application: Application) : AndroidViewModel(applicat
 
     init {
         refreshHardwareTelemetry()
+        refreshRadioHelperStatus()
         refreshSmartBatteryTracker(forcePersist = true)
 
         viewModelScope.launch {
@@ -213,6 +218,12 @@ class BatteryBossViewModel(application: Application) : AndroidViewModel(applicat
         BatteryTelemetryHub.refreshNotificationChannelDiagnostics(
             appContext,
             userSettings.value.silentNotificationEnabled
+        )
+    }
+
+    fun refreshRadioHelperStatus() {
+        BatteryTelemetryHub.setAccessibilityRadioHelperEnabled(
+            ChargerRadioController.isAccessibilityAutoToggleEnabled(appContext)
         )
     }
 
@@ -578,22 +589,33 @@ class BatteryBossViewModel(application: Application) : AndroidViewModel(applicat
     fun updateAutoDisableRadiosSettings(
         enabled: Boolean? = null,
         disableBluetooth: Boolean? = null,
-        disableWifiAndData: Boolean? = null
+        disableWifiAndData: Boolean? = null,
+        restoreOnUnplug: Boolean? = null
     ) {
         viewModelScope.launch {
             settingsDataStore.updateAutoDisableRadiosSettings(
                 enabled = enabled,
                 disableBluetooth = disableBluetooth,
-                disableWifiAndData = disableWifiAndData
+                disableWifiAndData = disableWifiAndData,
+                restoreOnUnplug = restoreOnUnplug
             )
             if (enabled == false) {
-                ChargerRadioController.cancelChargerRadioNotification(appContext)
+                settingsDataStore.clearPreChargeRadioSnapshot()
+                ChargerRadioController.cancelAllRadioNotifications(appContext)
             }
         }
     }
 
     fun openInternetConnectivityPanel() {
         ChargerRadioController.openInternetConnectivityPanel(appContext)
+    }
+
+    fun openAccessibilitySettingsForRadioHelper() {
+        ChargerRadioController.openAccessibilitySettings(appContext)
+    }
+
+    fun openAppDetailsForRestrictedSettings() {
+        ChargerRadioController.openAppDetailsSettings(appContext)
     }
 
     /**

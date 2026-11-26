@@ -2267,7 +2267,67 @@ class ExampleRobolectricTest {
             (hourlyNotif.flags and android.app.Notification.FLAG_AUTO_CANCEL) != 0
         )
 
+        // 6. Selective unplug restore: Verify new manifest permissions, AccessibilityService registration,
+        //    and that onChargerDisconnectedSuspending restores ONLY previously-ON radios & clears snapshot
+        assertTrue(
+            "AndroidManifest must declare ACCESS_WIFI_STATE",
+            requestedPermissions.contains(android.Manifest.permission.ACCESS_WIFI_STATE)
+        )
+        assertTrue(
+            "AndroidManifest must declare CHANGE_WIFI_STATE",
+            requestedPermissions.contains(android.Manifest.permission.CHANGE_WIFI_STATE)
+        )
+        assertTrue(
+            "AndroidManifest must declare ACCESS_NETWORK_STATE",
+            requestedPermissions.contains(android.Manifest.permission.ACCESS_NETWORK_STATE)
+        )
+        val a11yServiceComponent = android.content.ComponentName(
+            context,
+            com.example.service.RadioToggleAccessibilityService::class.java
+        )
+        val a11yServiceInfo = context.packageManager.getServiceInfo(a11yServiceComponent, 0)
+        assertEquals(
+            android.Manifest.permission.BIND_ACCESSIBILITY_SERVICE,
+            a11yServiceInfo.permission
+        )
+
+        kotlinx.coroutines.runBlocking {
+            dataStore.updateAutoDisableRadiosSettings(
+                enabled = true,
+                disableBluetooth = true,
+                disableWifiAndData = true,
+                restoreOnUnplug = true
+            )
+            // Simulate: before charging Wi-Fi & Mobile Data were ON, Bluetooth was OFF
+            dataStore.savePreChargeRadioSnapshot(
+                bluetoothOn = false,
+                wifiOn = true,
+                mobileDataOn = true
+            )
+            val preDisconnectSettings = dataStore.getSettingsSnapshot()
+            assertTrue(preDisconnectSettings.hasPendingRadioRestoreOnUnplug)
+
+            com.example.hardware.ChargerRadioController.resetDebounceForTest()
+            val restoreResult = com.example.hardware.ChargerRadioController.onChargerDisconnectedSuspending(
+                context = context,
+                settings = preDisconnectSettings,
+                dataStore = dataStore,
+                bypassDebounce = true
+            )
+            assertTrue(restoreResult.restoreTriggered)
+            assertFalse("Bluetooth was OFF before charging -> must stay false in restore plan", restoreResult.plan.restoreBluetooth)
+            assertTrue("Wi-Fi was ON before charging -> must be true in restore plan", restoreResult.plan.restoreWifi)
+            assertTrue("Mobile Data was ON before charging -> must be true in restore plan", restoreResult.plan.restoreMobileData)
+
+            val postDisconnectSettings = dataStore.getSettingsSnapshot()
+            assertFalse(
+                "Pre-charge radio snapshot must be cleared after charger disconnect",
+                postDisconnectSettings.hasPendingRadioRestoreOnUnplug
+            )
+        }
+
         // Cleanup
+        com.example.hardware.ChargerRadioController.cancelAllRadioNotifications(context)
         com.example.service.SilentBackgroundMonitorEngine.stopSilentMonitoring(context)
     }
 }

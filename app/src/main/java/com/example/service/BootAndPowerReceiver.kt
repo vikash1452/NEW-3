@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import com.example.data.preferences.SettingsDataStore
+import com.example.hardware.ChargerRadioController
 import com.example.model.BackgroundMonitoringMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -30,7 +31,8 @@ class BootAndPowerReceiver : BroadcastReceiver() {
         scope.launch {
             try {
                 BatteryTelemetryHub.recordBroadcastEventHandled()
-                val settings = SettingsDataStore(appContext).getSettingsSnapshot()
+                val dataStore = SettingsDataStore(appContext)
+                val settings = dataStore.getSettingsSnapshot()
                 when (action) {
                     Intent.ACTION_BOOT_COMPLETED,
                     "android.intent.action.QUICKBOOT_POWERON",
@@ -64,6 +66,21 @@ class BootAndPowerReceiver : BroadcastReceiver() {
                                     triggerEvent = action
                                 )
                             }
+                        } else if (action == Intent.ACTION_POWER_CONNECTED && settings.autoDisableRadiosOnChargeEnabled) {
+                            ChargerRadioController.onChargerConnectedSuspending(
+                                context = appContext,
+                                settings = settings,
+                                dataStore = dataStore,
+                                isAppInForeground = BatteryTelemetryHub.isAppInForeground.value
+                            )
+                        } else if (action == Intent.ACTION_POWER_DISCONNECTED &&
+                            (settings.autoDisableRadiosOnChargeEnabled || settings.hasPendingRadioRestoreOnUnplug)
+                        ) {
+                            ChargerRadioController.onChargerDisconnectedSuspending(
+                                context = appContext,
+                                settings = settings,
+                                dataStore = dataStore
+                            )
                         }
                     }
                 }

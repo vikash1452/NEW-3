@@ -133,8 +133,12 @@ fun DashboardScreen(
     onSelectMonitoringMode: (BackgroundMonitoringMode) -> Unit = {},
     onToggleSilentNotification: (Boolean) -> Unit = {},
     onToggleHourlyStatusNotification: (Boolean) -> Unit = {},
-    onUpdateAutoDisableRadios: (Boolean?, Boolean?, Boolean?) -> Unit = { _, _, _ -> },
+    isAccessibilityRadioHelperEnabled: Boolean = false,
+    lastRadioAutomationStatus: String = "Ready",
+    onUpdateAutoDisableRadios: (Boolean?, Boolean?, Boolean?, Boolean?) -> Unit = { _, _, _, _ -> },
     onOpenInternetPanel: () -> Unit = {},
+    onOpenAccessibilitySettings: () -> Unit = {},
+    onOpenAppDetailsSettings: () -> Unit = {},
     onToggleVoiceAnnouncements: (Boolean) -> Unit = {},
     onTriggerNotificationAction: (String) -> Unit = {},
     onSpeakStatusNow: () -> Unit,
@@ -207,12 +211,16 @@ fun DashboardScreen(
             }
         }
 
-        // 4. Auto-Off Data, Wi-Fi & BT on Charge Card
+        // 4. Auto-Off Data, Wi-Fi & BT on Charge + Auto-Restore on Unplug Card
         item {
             AutoOffRadiosOnChargeCard(
                 settings = settings,
+                isAccessibilityHelperEnabled = isAccessibilityRadioHelperEnabled,
+                lastRadioAutomationStatus = lastRadioAutomationStatus,
                 onUpdateAutoDisableRadios = onUpdateAutoDisableRadios,
-                onOpenInternetPanel = onOpenInternetPanel
+                onOpenInternetPanel = onOpenInternetPanel,
+                onOpenAccessibilitySettings = onOpenAccessibilitySettings,
+                onOpenAppDetailsSettings = onOpenAppDetailsSettings
             )
         }
 
@@ -1750,8 +1758,12 @@ private fun TelemetryMetricCard(
 @Composable
 private fun AutoOffRadiosOnChargeCard(
     settings: UserSettings,
-    onUpdateAutoDisableRadios: (Boolean?, Boolean?, Boolean?) -> Unit,
-    onOpenInternetPanel: () -> Unit
+    isAccessibilityHelperEnabled: Boolean,
+    lastRadioAutomationStatus: String,
+    onUpdateAutoDisableRadios: (Boolean?, Boolean?, Boolean?, Boolean?) -> Unit,
+    onOpenInternetPanel: () -> Unit,
+    onOpenAccessibilitySettings: () -> Unit,
+    onOpenAppDetailsSettings: () -> Unit
 ) {
     val isEnabled = settings.autoDisableRadiosOnChargeEnabled
     val cardBorderColor by animateColorAsState(
@@ -1810,10 +1822,13 @@ private fun AutoOffRadiosOnChargeCard(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = if (isEnabled) {
-                                "Active: Faster, cooler charging when plugged in"
-                            } else {
-                                "Turn ON to save power & heat while charging"
+                            text = when {
+                                isEnabled && isAccessibilityHelperEnabled ->
+                                    "100% Auto ACTIVE: Turns OFF on plug-in & restores on unplug"
+                                isEnabled ->
+                                    "Enabled (Enable Auto-Toggle Helper below for hands-free control)"
+                                else ->
+                                    "Turn ON to save power & restore active radios when unplugged"
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = if (isEnabled) EmeraldCharge else TextSecondary
@@ -1822,7 +1837,7 @@ private fun AutoOffRadiosOnChargeCard(
                 }
                 Switch(
                     checked = isEnabled,
-                    onCheckedChange = { onUpdateAutoDisableRadios(it, null, null) },
+                    onCheckedChange = { onUpdateAutoDisableRadios(it, null, null, null) },
                     modifier = Modifier.testTag("auto_off_radios_master_switch"),
                     colors = SwitchDefaults.colors(
                         checkedThumbColor = Color(0xFF00210E),
@@ -1838,7 +1853,7 @@ private fun AutoOffRadiosOnChargeCard(
                 enter = fadeIn(tween(220)) + expandVertically(tween(220)),
                 exit = fadeOut(tween(180)) + shrinkVertically(tween(180))
             ) {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     HorizontalDivider(color = NavyCardBorder.copy(alpha = 0.6f))
 
                     // Sub-toggle 1: Bluetooth Auto-Off
@@ -1865,7 +1880,7 @@ private fun AutoOffRadiosOnChargeCard(
                                     color = TextPrimary
                                 )
                                 Text(
-                                    text = "Disables Bluetooth on connect (uses BLUETOOTH_CONNECT; Android 13+ may open quick settings)",
+                                    text = "Turns Bluetooth OFF automatically when charger plugs in",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = TextSecondary
                                 )
@@ -1873,7 +1888,7 @@ private fun AutoOffRadiosOnChargeCard(
                         }
                         Switch(
                             checked = settings.autoDisableBluetoothOnCharge,
-                            onCheckedChange = { onUpdateAutoDisableRadios(null, it, null) },
+                            onCheckedChange = { onUpdateAutoDisableRadios(null, it, null, null) },
                             modifier = Modifier.testTag("auto_off_bluetooth_switch"),
                             colors = SwitchDefaults.colors(
                                 checkedThumbColor = Color(0xFF00210E),
@@ -1884,7 +1899,7 @@ private fun AutoOffRadiosOnChargeCard(
                         )
                     }
 
-                    // Sub-toggle 2: Wi-Fi & Mobile Data 1-Tap Internet Panel Prompt
+                    // Sub-toggle 2: Wi-Fi & Mobile Data Auto-Off
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -1897,18 +1912,18 @@ private fun AutoOffRadiosOnChargeCard(
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Wifi,
-                                contentDescription = "Wi-Fi and Mobile Data quick-off panel",
+                                contentDescription = "Wi-Fi and Mobile Data auto-off",
                                 tint = EmeraldCharge,
                                 modifier = Modifier.size(18.dp)
                             )
                             Column {
                                 Text(
-                                    text = "Wi-Fi & Mobile Data Quick-Off Alert",
+                                    text = "Auto-Disable Wi-Fi & Mobile Data",
                                     style = MaterialTheme.typography.labelLarge,
                                     color = TextPrimary
                                 )
                                 Text(
-                                    text = "Posts 1-tap 'Open Internet Panel' notification (or opens panel directly when app is open)",
+                                    text = "Toggles Wi-Fi & Mobile Data OFF via Helper (or 1-tap Internet Panel)",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = TextSecondary
                                 )
@@ -1916,7 +1931,7 @@ private fun AutoOffRadiosOnChargeCard(
                         }
                         Switch(
                             checked = settings.autoDisableWifiAndDataOnCharge,
-                            onCheckedChange = { onUpdateAutoDisableRadios(null, null, it) },
+                            onCheckedChange = { onUpdateAutoDisableRadios(null, null, it, null) },
                             modifier = Modifier.testTag("auto_off_wifi_data_switch"),
                             colors = SwitchDefaults.colors(
                                 checkedThumbColor = Color(0xFF00210E),
@@ -1925,6 +1940,170 @@ private fun AutoOffRadiosOnChargeCard(
                                 uncheckedTrackColor = NavySurfaceElevated
                             )
                         )
+                    }
+
+                    // Sub-toggle 3: Auto-Restore on Charger Unplug (Selective restore)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Refresh,
+                                contentDescription = "Auto-Restore previously ON radios on unplug",
+                                tint = EmeraldCharge,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Column {
+                                Text(
+                                    text = "Auto-Restore on Charger Unplug",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = TextPrimary
+                                )
+                                Text(
+                                    text = "Automatically turns back ON ONLY whichever (Wi-Fi / BT / Data) was ON before charging",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = TextSecondary
+                                )
+                            }
+                        }
+                        Switch(
+                            checked = settings.autoRestoreRadiosOnUnplugEnabled,
+                            onCheckedChange = { onUpdateAutoDisableRadios(null, null, null, it) },
+                            modifier = Modifier.testTag("auto_restore_radios_switch"),
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color(0xFF00210E),
+                                checkedTrackColor = EmeraldCharge,
+                                uncheckedThumbColor = TextSecondary,
+                                uncheckedTrackColor = NavySurfaceElevated
+                            )
+                        )
+                    }
+
+                    // Accessibility Helper Status & Setup Box
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = if (isAccessibilityHelperEnabled) {
+                            EmeraldCharge.copy(alpha = 0.10f)
+                        } else {
+                            AmberWarning.copy(alpha = 0.10f)
+                        },
+                        border = BorderStroke(
+                            1.dp,
+                            if (isAccessibilityHelperEnabled) {
+                                EmeraldCharge.copy(alpha = 0.45f)
+                            } else {
+                                AmberWarning.copy(alpha = 0.55f)
+                            }
+                        )
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = if (isAccessibilityHelperEnabled) {
+                                        "AUTO-TOGGLE HELPER: ACTIVE"
+                                    } else {
+                                        "AUTO-TOGGLE HELPER: SETUP NEEDED"
+                                    },
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = if (isAccessibilityHelperEnabled) EmeraldCharge else AmberWarning,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.testTag("radio_accessibility_status_badge")
+                                )
+                            }
+
+                            Text(
+                                text = if (isAccessibilityHelperEnabled) {
+                                    "Battery Boss Radio Auto-Toggle is active! Wi-Fi, Bluetooth & Mobile Data will turn OFF on charger connect and auto-restore on unplug."
+                                } else {
+                                    "Android 10–16 blocks apps from silently toggling Wi-Fi, Mobile Data & Bluetooth. Enable 'Battery Boss Radio Auto-Toggle' in Accessibility Settings once so Battery Boss can flip Quick Settings automatically."
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = TextPrimary
+                            )
+
+                            if (lastRadioAutomationStatus.isNotBlank() && lastRadioAutomationStatus != "Ready") {
+                                Text(
+                                    text = "Last status: $lastRadioAutomationStatus",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = ElectricCyan,
+                                    modifier = Modifier.testTag("radio_last_automation_status")
+                                )
+                            }
+
+                            Button(
+                                onClick = onOpenAccessibilitySettings,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .testTag("enable_radio_accessibility_button"),
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (isAccessibilityHelperEnabled) NavySurfaceElevated else EmeraldCharge,
+                                    contentColor = if (isAccessibilityHelperEnabled) ElectricCyan else Color(0xFF00210E)
+                                )
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+                                    contentDescription = "Open Accessibility Settings",
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = if (isAccessibilityHelperEnabled) {
+                                        "MANAGE AUTO-TOGGLE HELPER"
+                                    } else {
+                                        "ENABLE AUTO-TOGGLE HELPER"
+                                    },
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+
+                            if (!isAccessibilityHelperEnabled) {
+                                OutlinedButton(
+                                    onClick = onOpenAppDetailsSettings,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(48.dp)
+                                        .testTag("open_radio_app_info_button"),
+                                    shape = RoundedCornerShape(12.dp),
+                                    border = BorderStroke(1.dp, AmberWarning.copy(alpha = 0.7f))
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Info,
+                                        contentDescription = "Open App Info for Restricted Settings",
+                                        tint = AmberWarning,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = "ALLOW RESTRICTED SETTINGS (APP INFO)",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = AmberWarning
+                                    )
+                                }
+                                Text(
+                                    text = "If Android says 'Restricted setting' on a sideloaded APK: tap App Info above -> tap 3 dots (top-right) -> Allow restricted settings -> then enable Accessibility.",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = TextSecondary
+                                )
+                            }
+                        }
                     }
 
                     OutlinedButton(
@@ -1972,7 +2151,7 @@ private fun AutoOffRadiosOnChargeCard(
                         modifier = Modifier.size(16.dp)
                     )
                     Text(
-                        text = "Android 10+ security rules block apps from toggling Wi-Fi or Mobile Data silently in the background. When you plug in your charger, Battery Boss automatically attempts to turn off Bluetooth and pops a 1-tap Internet Panel prompt so you can switch off Wi-Fi & Mobile Data immediately.",
+                        text = "Android 10–16 security rules block apps from toggling Wi-Fi, Mobile Data, or Android 13+ Bluetooth without user consent. With the optional Battery Boss Radio Auto-Toggle Accessibility Helper enabled, Battery Boss switches them OFF on charger connect and turns ONLY previously-active radios back ON when unplugged — zero root required.",
                         style = MaterialTheme.typography.labelSmall,
                         color = TextSecondary,
                         modifier = Modifier.testTag("auto_off_radios_os_note")

@@ -324,9 +324,10 @@ object SilentBackgroundMonitorEngine {
 
             if (triggerAction == Intent.ACTION_POWER_CONNECTED) {
                 if (settings.autoDisableRadiosOnChargeEnabled) {
-                    ChargerRadioController.onChargerConnected(
+                    ChargerRadioController.onChargerConnectedSuspending(
                         context = appContext,
                         settings = settings,
+                        dataStore = dataStore,
                         isAppInForeground = BatteryTelemetryHub.isAppInForeground.value
                     )
                 }
@@ -337,7 +338,11 @@ object SilentBackgroundMonitorEngine {
                     }
                 }
             } else if (triggerAction == Intent.ACTION_POWER_DISCONNECTED) {
-                ChargerRadioController.cancelChargerRadioNotification(appContext)
+                ChargerRadioController.onChargerDisconnectedSuspending(
+                    context = appContext,
+                    settings = settings,
+                    dataStore = dataStore
+                )
                 voiceAssistant.prewarmChargerAnnouncement(alignedSnap)
             }
 

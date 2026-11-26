@@ -829,10 +829,15 @@ data class UserSettings(
     val persistentNotificationEnabled: Boolean = true,
     val installedModelIds: Set<String> = emptySet(),
 
-    // Auto-Off Bluetooth / Wi-Fi / Mobile Data Quick Controls on Charger Connect
+    // Auto-Off Bluetooth / Wi-Fi / Mobile Data Quick Controls on Charger Connect + Smart Unplug Restore
     val autoDisableRadiosOnChargeEnabled: Boolean = false,
     val autoDisableBluetoothOnCharge: Boolean = true,
     val autoDisableWifiAndDataOnCharge: Boolean = true,
+    val autoRestoreRadiosOnUnplugEnabled: Boolean = true,
+    val savedPreChargeBluetoothOn: Boolean = false,
+    val savedPreChargeWifiOn: Boolean = false,
+    val savedPreChargeMobileDataOn: Boolean = false,
+    val hasPendingRadioRestoreOnUnplug: Boolean = false,
 
     // Smart Battery Saver & Auto Battery Management Settings
     val batterySaverMode: BatterySaverMode = BatterySaverMode.NORMAL,

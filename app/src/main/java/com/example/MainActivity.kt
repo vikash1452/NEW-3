@@ -175,6 +175,16 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         BatteryTelemetryHub.setAppInForeground(true)
+        BatteryTelemetryHub.setAccessibilityRadioHelperEnabled(
+            com.example.hardware.ChargerRadioController.isAccessibilityAutoToggleEnabled(applicationContext)
+        )
+    }
+
+    override fun onResume() {
+        super.onResume()
+        BatteryTelemetryHub.setAccessibilityRadioHelperEnabled(
+            com.example.hardware.ChargerRadioController.isAccessibilityAutoToggleEnabled(applicationContext)
+        )
     }
 
     override fun onStop() {
@@ -775,6 +785,8 @@ fun BatteryBossApp(
     val selectedAppForDetails by viewModel.selectedAppForDetails.collectAsStateWithLifecycle()
     val selectedAppHistoryRecords by viewModel.selectedAppHistoryRecords.collectAsStateWithLifecycle()
     val isIgnoringOptimizations by viewModel.isIgnoringBatteryOptimizations.collectAsStateWithLifecycle()
+    val isAccessibilityRadioHelperEnabled by viewModel.isAccessibilityRadioHelperEnabled.collectAsStateWithLifecycle()
+    val lastRadioAutomationStatus by viewModel.lastRadioAutomationStatus.collectAsStateWithLifecycle()
 
     LaunchedEffect(
         settings.silentNotificationEnabled,
@@ -1147,7 +1159,9 @@ fun BatteryBossApp(
                             }
                             viewModel.updateHourlyStatusNotificationEnabled(enable)
                         },
-                        onUpdateAutoDisableRadios = { enabled, disableBt, disableWifiData ->
+                        isAccessibilityRadioHelperEnabled = isAccessibilityRadioHelperEnabled,
+                        lastRadioAutomationStatus = lastRadioAutomationStatus,
+                        onUpdateAutoDisableRadios = { enabled, disableBt, disableWifiData, restoreOnUnplug ->
                             val willBeEnabled = enabled ?: settings.autoDisableRadiosOnChargeEnabled
                             val willDisableBt = disableBt ?: settings.autoDisableBluetoothOnCharge
                             val willPromptInternet = disableWifiData ?: settings.autoDisableWifiAndDataOnCharge
@@ -1172,10 +1186,13 @@ fun BatteryBossApp(
                             viewModel.updateAutoDisableRadiosSettings(
                                 enabled = enabled,
                                 disableBluetooth = disableBt,
-                                disableWifiAndData = disableWifiData
+                                disableWifiAndData = disableWifiData,
+                                restoreOnUnplug = restoreOnUnplug
                             )
                         },
                         onOpenInternetPanel = { viewModel.openInternetConnectivityPanel() },
+                        onOpenAccessibilitySettings = { viewModel.openAccessibilitySettingsForRadioHelper() },
+                        onOpenAppDetailsSettings = { viewModel.openAppDetailsForRestrictedSettings() },
                         onToggleVoiceAnnouncements = { enable ->
                             viewModel.toggleVoiceAnnouncementsEnabled(enable)
                         },

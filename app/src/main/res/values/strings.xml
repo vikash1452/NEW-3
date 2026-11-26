@@ -14,4 +14,6 @@
     <string name="update_rocket_content_desc">App update rocket illustration</string>
     <string name="update_download_toast_message">Sir, abhi app mein update aa gaya hai. Please download the new version.</string>
     <string name="update_open_link_error">Unable to open download link. Please check your browser.</string>
+    <string name="accessibility_radio_service_label">Battery Boss Radio Auto-Toggle</string>
+    <string name="accessibility_radio_service_description">Optional helper that turns OFF Bluetooth, Wi-Fi, and Mobile Data in Quick Settings when you connect your charger, and turns back ON whichever ones were active when you unplug. Never reads personal screen data.</string>
 </resources>

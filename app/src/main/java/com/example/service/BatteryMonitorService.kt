@@ -119,6 +119,14 @@ object BatteryTelemetryHub {
     val notificationChannelDiagnostics: StateFlow<NotificationChannelDiagnostics> =
         _notificationChannelDiagnostics.asStateFlow()
 
+    private val _isAccessibilityRadioHelperEnabled = MutableStateFlow(false)
+    val isAccessibilityRadioHelperEnabled: StateFlow<Boolean> =
+        _isAccessibilityRadioHelperEnabled.asStateFlow()
+
+    private val _lastRadioAutomationStatus = MutableStateFlow("Ready")
+    val lastRadioAutomationStatus: StateFlow<String> =
+        _lastRadioAutomationStatus.asStateFlow()
+
     // Self-Power & Efficiency Audit Counters
     private val broadcastEventsCount = AtomicInteger(0)
     private val screenOnGaugeReadsCount = AtomicInteger(0)
@@ -213,6 +221,14 @@ object BatteryTelemetryHub {
 
     fun recordNotificationActionHandled(action: String) {
         _lastNotificationActionHandled.value = action
+    }
+
+    fun setAccessibilityRadioHelperEnabled(enabled: Boolean) {
+        _isAccessibilityRadioHelperEnabled.value = enabled
+    }
+
+    fun updateLastRadioAutomationStatus(status: String) {
+        _lastRadioAutomationStatus.value = status
     }
 
     fun recordBroadcastEventHandled() {
@@ -951,11 +967,14 @@ class BatteryMonitorService : Service() {
                 }
                 if (action == Intent.ACTION_POWER_CONNECTED) {
                     if (fastSettings.autoDisableRadiosOnChargeEnabled) {
-                        ChargerRadioController.onChargerConnected(
-                            context = applicationContext,
-                            settings = fastSettings,
-                            isAppInForeground = BatteryTelemetryHub.isAppInForeground.value
-                        )
+                        serviceScope.launch(Dispatchers.IO) {
+                            ChargerRadioController.onChargerConnectedSuspending(
+                                context = applicationContext,
+                                settings = fastSettings,
+                                dataStore = settingsDataStore,
+                                isAppInForeground = BatteryTelemetryHub.isAppInForeground.value
+                            )
+                        }
                     }
                     serviceScope.launch(Dispatchers.IO) {
                         val refreshedLocked = UpdateLockManager.refreshIfStaleAndCheckLocked(applicationContext)
@@ -964,7 +983,13 @@ class BatteryMonitorService : Service() {
                         }
                     }
                 } else if (action == Intent.ACTION_POWER_DISCONNECTED) {
-                    ChargerRadioController.cancelChargerRadioNotification(applicationContext)
+                    serviceScope.launch(Dispatchers.IO) {
+                        ChargerRadioController.onChargerDisconnectedSuspending(
+                            context = applicationContext,
+                            settings = fastSettings,
+                            dataStore = settingsDataStore
+                        )
+                    }
                     voiceAssistant.prewarmChargerAnnouncement(alignedSnap)
                 }
             } finally {

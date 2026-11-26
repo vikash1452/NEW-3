@@ -95,10 +95,15 @@ class SettingsDataStore(private val context: Context) {
         val START_ON_BOOT = booleanPreferencesKey("start_on_boot_enabled")
         val PERSISTENT_NOTIFICATION = booleanPreferencesKey("persistent_notification_enabled")
 
-        // Auto-Off Bluetooth / Wi-Fi / Mobile Data on Charger Connect
+        // Auto-Off Bluetooth / Wi-Fi / Mobile Data on Charger Connect + Unplug Restore Snapshot
         val AUTO_DISABLE_RADIOS_ON_CHARGE = booleanPreferencesKey("auto_disable_radios_on_charge_enabled")
         val AUTO_DISABLE_BT_ON_CHARGE = booleanPreferencesKey("auto_disable_bluetooth_on_charge")
         val AUTO_DISABLE_WIFI_DATA_ON_CHARGE = booleanPreferencesKey("auto_disable_wifi_and_data_on_charge")
+        val AUTO_RESTORE_RADIOS_ON_UNPLUG = booleanPreferencesKey("auto_restore_radios_on_unplug_enabled")
+        val SAVED_PRE_CHARGE_BT_ON = booleanPreferencesKey("saved_pre_charge_bluetooth_on")
+        val SAVED_PRE_CHARGE_WIFI_ON = booleanPreferencesKey("saved_pre_charge_wifi_on")
+        val SAVED_PRE_CHARGE_DATA_ON = booleanPreferencesKey("saved_pre_charge_mobile_data_on")
+        val HAS_PENDING_RADIO_RESTORE = booleanPreferencesKey("has_pending_radio_restore_on_unplug")
 
         // Smart Battery Saver & Auto Management Keys
         val BATTERY_SAVER_MODE = stringPreferencesKey("battery_saver_mode")
@@ -227,6 +232,11 @@ class SettingsDataStore(private val context: Context) {
             autoDisableRadiosOnChargeEnabled = prefs[Keys.AUTO_DISABLE_RADIOS_ON_CHARGE] ?: false,
             autoDisableBluetoothOnCharge = prefs[Keys.AUTO_DISABLE_BT_ON_CHARGE] ?: true,
             autoDisableWifiAndDataOnCharge = prefs[Keys.AUTO_DISABLE_WIFI_DATA_ON_CHARGE] ?: true,
+            autoRestoreRadiosOnUnplugEnabled = prefs[Keys.AUTO_RESTORE_RADIOS_ON_UNPLUG] ?: true,
+            savedPreChargeBluetoothOn = prefs[Keys.SAVED_PRE_CHARGE_BT_ON] ?: false,
+            savedPreChargeWifiOn = prefs[Keys.SAVED_PRE_CHARGE_WIFI_ON] ?: false,
+            savedPreChargeMobileDataOn = prefs[Keys.SAVED_PRE_CHARGE_DATA_ON] ?: false,
+            hasPendingRadioRestoreOnUnplug = prefs[Keys.HAS_PENDING_RADIO_RESTORE] ?: false,
 
             batterySaverMode = saverMode,
             autoBatterySaverEnabled = prefs[Keys.AUTO_BATTERY_SAVER_ENABLED] ?: false,
@@ -470,12 +480,36 @@ class SettingsDataStore(private val context: Context) {
     suspend fun updateAutoDisableRadiosSettings(
         enabled: Boolean? = null,
         disableBluetooth: Boolean? = null,
-        disableWifiAndData: Boolean? = null
+        disableWifiAndData: Boolean? = null,
+        restoreOnUnplug: Boolean? = null
     ) {
         context.dataStore.edit { prefs ->
             enabled?.let { prefs[Keys.AUTO_DISABLE_RADIOS_ON_CHARGE] = it }
             disableBluetooth?.let { prefs[Keys.AUTO_DISABLE_BT_ON_CHARGE] = it }
             disableWifiAndData?.let { prefs[Keys.AUTO_DISABLE_WIFI_DATA_ON_CHARGE] = it }
+            restoreOnUnplug?.let { prefs[Keys.AUTO_RESTORE_RADIOS_ON_UNPLUG] = it }
+        }
+    }
+
+    suspend fun savePreChargeRadioSnapshot(
+        bluetoothOn: Boolean,
+        wifiOn: Boolean,
+        mobileDataOn: Boolean
+    ) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.SAVED_PRE_CHARGE_BT_ON] = bluetoothOn
+            prefs[Keys.SAVED_PRE_CHARGE_WIFI_ON] = wifiOn
+            prefs[Keys.SAVED_PRE_CHARGE_DATA_ON] = mobileDataOn
+            prefs[Keys.HAS_PENDING_RADIO_RESTORE] = true
+        }
+    }
+
+    suspend fun clearPreChargeRadioSnapshot() {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.SAVED_PRE_CHARGE_BT_ON] = false
+            prefs[Keys.SAVED_PRE_CHARGE_WIFI_ON] = false
+            prefs[Keys.SAVED_PRE_CHARGE_DATA_ON] = false
+            prefs[Keys.HAS_PENDING_RADIO_RESTORE] = false
         }
     }
 
