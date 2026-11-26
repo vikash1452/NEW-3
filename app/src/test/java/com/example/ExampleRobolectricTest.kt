@@ -2290,6 +2290,10 @@ class ExampleRobolectricTest {
             android.Manifest.permission.BIND_ACCESSIBILITY_SERVICE,
             a11yServiceInfo.permission
         )
+        assertTrue(
+            "RadioToggleAccessibilityService must be exported=true so Android OS can bind it",
+            a11yServiceInfo.exported
+        )
 
         kotlinx.coroutines.runBlocking {
             dataStore.updateAutoDisableRadiosSettings(
