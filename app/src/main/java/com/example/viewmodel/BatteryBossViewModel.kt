@@ -14,6 +14,7 @@ import com.example.data.local.BatteryUsageHistoryEntity
 import com.example.data.local.ChargingSessionEntity
 import com.example.data.preferences.SettingsDataStore
 import com.example.hardware.BatteryHardwareReader
+import com.example.hardware.ChargerRadioController
 import com.example.hardware.SmartAppUsageTracker
 import com.example.model.AnnouncementRepeatPolicy
 import com.example.model.AppBatteryUsageRecord
@@ -515,7 +516,7 @@ class BatteryBossViewModel(application: Application) : AndroidViewModel(applicat
             val currentMode = userSettings.value.backgroundMonitoringMode
             settingsDataStore.updateBackgroundSettings(
                 backgroundMonitoring = enable,
-                persistentNotification = enable,
+                persistentNotification = enable && currentMode.requiresPersistentNotification,
                 monitoringMode = currentMode
             )
             SilentBackgroundMonitorEngine.applyMonitoringMode(
@@ -527,35 +528,72 @@ class BatteryBossViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     /**
-     * Switches between two distinct immutable Android Notification Channels:
-     * 1. `SILENT_BACKGROUND` -> `battery_boss_silent_channel` (created at `IMPORTANCE_MIN`)
-     * 2. `CONTINUOUS_FOREGROUND` -> `battery_boss_standard_channel` (created at `IMPORTANCE_LOW`)
-     * Reposts `NOTIFICATION_ID` in-place onto the selected channel without stopping or restarting
-     * `BatteryMonitorService`, and reads back OS NotificationManager channel state honestly.
+     * Switches cleanly between:
+     * 1. `NO_PERSISTENT_HOURLY` -> stops `BatteryMonitorService`, cancels Notification ID 4010 (0 persistent notifications),
+     *    keeps instant charger events via `BootAndPowerReceiver`, and schedules 1-hour `JobScheduler` checks.
+     * 2. `SILENT_BACKGROUND` -> `battery_boss_silent_channel` (`IMPORTANCE_MIN` compact FGS notification).
+     * 3. `CONTINUOUS_FOREGROUND` -> `battery_boss_standard_channel` (`IMPORTANCE_LOW` FGS notification with buttons).
      */
     fun setBackgroundMonitoringMode(mode: BackgroundMonitoringMode) {
         viewModelScope.launch {
             val currentEnabled = userSettings.value.backgroundMonitoringEnabled
             val isSilent = mode == BackgroundMonitoringMode.SILENT_BACKGROUND
-            settingsDataStore.updateBackgroundSettings(
-                silentNotification = isSilent,
-                monitoringMode = mode
-            )
+            settingsDataStore.updateBackgroundMonitoringMode(mode)
             BatteryTelemetryHub.setActiveMonitoringMode(mode)
-            BatteryTelemetryHub.setSilentBackgroundActive(isSilent)
-            if (currentEnabled || BatteryTelemetryHub.isServiceRunning.value || BatteryMonitorService.isLiveServiceInstanceActive()) {
-                if (BatteryMonitorService.isLiveServiceInstanceActive() || BatteryTelemetryHub.isServiceRunning.value) {
-                    BatteryMonitorService.refreshNotificationInPlace(appContext, silentOverride = isSilent)
-                } else {
-                    SilentBackgroundMonitorEngine.applyMonitoringMode(
-                        context = appContext,
-                        enabled = true,
-                        mode = mode
-                    )
+
+            if (mode == BackgroundMonitoringMode.NO_PERSISTENT_HOURLY) {
+                BatteryTelemetryHub.setSilentBackgroundActive(currentEnabled)
+                SilentBackgroundMonitorEngine.applyMonitoringMode(
+                    context = appContext,
+                    enabled = currentEnabled,
+                    mode = BackgroundMonitoringMode.NO_PERSISTENT_HOURLY
+                )
+            } else {
+                BatteryTelemetryHub.setSilentBackgroundActive(isSilent)
+                if (currentEnabled || BatteryTelemetryHub.isServiceRunning.value || BatteryMonitorService.isLiveServiceInstanceActive()) {
+                    if (BatteryMonitorService.isLiveServiceInstanceActive()) {
+                        BatteryMonitorService.refreshNotificationInPlace(appContext, silentOverride = isSilent)
+                    } else {
+                        SilentBackgroundMonitorEngine.applyMonitoringMode(
+                            context = appContext,
+                            enabled = true,
+                            mode = mode
+                        )
+                    }
                 }
             }
             BatteryTelemetryHub.refreshNotificationChannelDiagnostics(appContext, isSilent)
         }
+    }
+
+    fun updateHourlyStatusNotificationEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsDataStore.updateHourlyStatusNotificationEnabled(enabled)
+            if (!enabled) {
+                SilentBackgroundMonitorEngine.cancelHourlyStatusNotification(appContext)
+            }
+        }
+    }
+
+    fun updateAutoDisableRadiosSettings(
+        enabled: Boolean? = null,
+        disableBluetooth: Boolean? = null,
+        disableWifiAndData: Boolean? = null
+    ) {
+        viewModelScope.launch {
+            settingsDataStore.updateAutoDisableRadiosSettings(
+                enabled = enabled,
+                disableBluetooth = disableBluetooth,
+                disableWifiAndData = disableWifiAndData
+            )
+            if (enabled == false) {
+                ChargerRadioController.cancelChargerRadioNotification(appContext)
+            }
+        }
+    }
+
+    fun openInternetConnectivityPanel() {
+        ChargerRadioController.openInternetConnectivityPanel(appContext)
     }
 
     /**
@@ -578,7 +616,15 @@ class BatteryBossViewModel(application: Application) : AndroidViewModel(applicat
                 BatteryTelemetryHub.isServiceRunning.value ||
                 BatteryMonitorService.isLiveServiceInstanceActive()
             ) {
-                BatteryMonitorService.refreshNotificationInPlace(appContext, silentOverride = enable)
+                if (BatteryMonitorService.isLiveServiceInstanceActive()) {
+                    BatteryMonitorService.refreshNotificationInPlace(appContext, silentOverride = enable)
+                } else {
+                    SilentBackgroundMonitorEngine.applyMonitoringMode(
+                        context = appContext,
+                        enabled = true,
+                        mode = targetMode
+                    )
+                }
             }
             BatteryTelemetryHub.refreshNotificationChannelDiagnostics(appContext, enable)
         }
@@ -586,8 +632,7 @@ class BatteryBossViewModel(application: Application) : AndroidViewModel(applicat
 
     /**
      * Independent Background Voice ON/OFF toggle (Control #2):
-     * Turning Background Voice OFF mutes spoken alerts ONLY; `BatteryMonitorService`
-     * (Background Monitoring) remains active and running.
+     * Turning Background Voice OFF mutes spoken alerts ONLY; background monitoring remains active.
      */
     fun toggleVoiceAnnouncementsEnabled(enable: Boolean) {
         viewModelScope.launch {
@@ -595,7 +640,7 @@ class BatteryBossViewModel(application: Application) : AndroidViewModel(applicat
             if (!enable) {
                 voiceAssistant.cancelPendingNonCriticalAnnouncements()
             }
-            if (BatteryTelemetryHub.isServiceRunning.value) {
+            if (BatteryMonitorService.isLiveServiceInstanceActive()) {
                 BatteryMonitorService.refreshNotificationInPlace(appContext)
             }
         }

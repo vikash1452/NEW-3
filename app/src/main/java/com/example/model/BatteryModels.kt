@@ -724,6 +724,15 @@ enum class BackgroundMonitoringMode(
     val mechanismSummary: String,
     val reliabilityAndLimitationsNote: String
 ) {
+    NO_PERSISTENT_HOURLY(
+        title = "No Persistent Notification (Hourly Check)",
+        shortBadge = "NO NOTIFICATION • 1-HR CHECK",
+        channelId = "battery_boss_hourly_status_channel",
+        requiresPersistentNotification = false,
+        usesForegroundService = false,
+        mechanismSummary = "Stops BatteryMonitorService (0 ongoing notifications) • BootAndPowerReceiver fires instant charger events • JobScheduler runs 1-hour battery checks",
+        reliabilityAndLimitationsNote = "Clean status bar with zero persistent notification. Charger Connect/Disconnect & Low Battery voice alerts fire instantly via BootAndPowerReceiver, while a 1-hour JobScheduler check logs battery health and optionally posts a single swipe-dismissible status notification."
+    ),
     SILENT_BACKGROUND(
         title = "Silent Notification Channel (battery_boss_silent_channel)",
         shortBadge = "SILENT CHANNEL • FGS ON",
@@ -734,7 +743,7 @@ enum class BackgroundMonitoringMode(
         reliabilityAndLimitationsNote = "Channel 'battery_boss_silent_channel' is created at IMPORTANCE_MIN (compact 'Battery Boss Active • 83%', 0 buttons, 0 sound/vibration). Android locks channel importance once created and respects your System Settings override; Battery Boss switches channels by reposting onto the silent channel without stopping the Foreground Service."
     ),
     CONTINUOUS_FOREGROUND(
-        title = "Standard Notification Channel (battery_boss_standard_channel)",
+        title = "Continuous Foreground Service (battery_boss_standard_channel)",
         shortBadge = "STANDARD CHANNEL • FGS ON",
         channelId = "battery_boss_standard_channel",
         requiresPersistentNotification = true,
@@ -815,9 +824,15 @@ data class UserSettings(
     val backgroundMonitoringMode: BackgroundMonitoringMode = BackgroundMonitoringMode.SILENT_BACKGROUND,
     val voiceAnnouncementsEnabled: Boolean = true,
     val silentNotificationEnabled: Boolean = true,
+    val hourlyStatusNotificationEnabled: Boolean = true,
     val startOnBootEnabled: Boolean = true,
     val persistentNotificationEnabled: Boolean = true,
     val installedModelIds: Set<String> = emptySet(),
+
+    // Auto-Off Bluetooth / Wi-Fi / Mobile Data Quick Controls on Charger Connect
+    val autoDisableRadiosOnChargeEnabled: Boolean = false,
+    val autoDisableBluetoothOnCharge: Boolean = true,
+    val autoDisableWifiAndDataOnCharge: Boolean = true,
 
     // Smart Battery Saver & Auto Battery Management Settings
     val batterySaverMode: BatterySaverMode = BatterySaverMode.NORMAL,

@@ -4,8 +4,13 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -28,8 +33,10 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeveloperBoard
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.WarningAmber
@@ -89,6 +96,7 @@ fun HardwareAndOemScreen(
     onToggleMonitoring: (Boolean) -> Unit,
     onSelectMonitoringMode: (BackgroundMonitoringMode) -> Unit = {},
     onToggleSilentNotification: (Boolean) -> Unit = {},
+    onToggleHourlyStatusNotification: (Boolean) -> Unit = {},
     onToggleVoiceAnnouncements: (Boolean) -> Unit = {},
     onTriggerNotificationAction: (String) -> Unit = {},
     onUpdateBackgroundSettings: (Boolean?, Boolean?) -> Unit,
@@ -106,7 +114,7 @@ fun HardwareAndOemScreen(
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // 1. Background Operation, Dual Notification Channels & 3 Independent Controls
+        // 1. Background Operation, No-Persistent Hourly Mode & Dual Notification Channels
         item {
             BackgroundServiceControlCard(
                 snapshot = snapshot,
@@ -120,6 +128,7 @@ fun HardwareAndOemScreen(
                 onToggleMonitoring = onToggleMonitoring,
                 onSelectMonitoringMode = onSelectMonitoringMode,
                 onToggleSilentNotification = onToggleSilentNotification,
+                onToggleHourlyStatusNotification = onToggleHourlyStatusNotification,
                 onToggleVoiceAnnouncements = onToggleVoiceAnnouncements,
                 onTriggerNotificationAction = onTriggerNotificationAction,
                 onUpdateBackgroundSettings = onUpdateBackgroundSettings,
@@ -208,6 +217,7 @@ private fun BackgroundServiceControlCard(
     onToggleMonitoring: (Boolean) -> Unit,
     onSelectMonitoringMode: (BackgroundMonitoringMode) -> Unit,
     onToggleSilentNotification: (Boolean) -> Unit,
+    onToggleHourlyStatusNotification: (Boolean) -> Unit,
     onToggleVoiceAnnouncements: (Boolean) -> Unit,
     onTriggerNotificationAction: (String) -> Unit,
     onUpdateBackgroundSettings: (Boolean?, Boolean?) -> Unit,
@@ -216,7 +226,12 @@ private fun BackgroundServiceControlCard(
     onOpenAppDetails: () -> Unit
 ) {
     val activeMode = settings.backgroundMonitoringMode
-    val isSilentSelected = settings.silentNotificationEnabled || activeMode == BackgroundMonitoringMode.SILENT_BACKGROUND
+    val isNoPersistentHourly = activeMode == BackgroundMonitoringMode.NO_PERSISTENT_HOURLY
+    val isSilentSelected = !isNoPersistentHourly &&
+        (settings.silentNotificationEnabled || activeMode == BackgroundMonitoringMode.SILENT_BACKGROUND)
+    val isContinuousSelected = !isNoPersistentHourly && !isSilentSelected
+    val isMonitoringActive = isServiceRunning ||
+        (settings.backgroundMonitoringEnabled && isSilentBackgroundActive)
 
     Card(
         modifier = Modifier
@@ -258,29 +273,29 @@ private fun BackgroundServiceControlCard(
 
             // Start / Stop Monitoring Action Button
             Button(
-                onClick = { onToggleMonitoring(!isServiceRunning) },
+                onClick = { onToggleMonitoring(!isMonitoringActive) },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(48.dp)
                     .testTag("start_stop_service_button"),
                 shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = if (isServiceRunning) ThermalCrimson else EmeraldCharge,
-                    contentColor = if (isServiceRunning) Color.White else Color(0xFF00210E)
+                    containerColor = if (isMonitoringActive) ThermalCrimson else EmeraldCharge,
+                    contentColor = if (isMonitoringActive) Color.White else Color(0xFF00210E)
                 )
             ) {
                 Icon(
-                    imageVector = if (isServiceRunning) Icons.Default.Stop else Icons.Default.PlayArrow,
+                    imageVector = if (isMonitoringActive) Icons.Default.Stop else Icons.Default.PlayArrow,
                     contentDescription = null
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = if (isServiceRunning) "STOP BACKGROUND MONITORING" else "START BACKGROUND MONITORING",
+                    text = if (isMonitoringActive) "STOP BACKGROUND MONITORING" else "START BACKGROUND MONITORING",
                     style = MaterialTheme.typography.labelLarge
                 )
             }
 
-            // Compact & Silent Notification Preview Card
+            // Background Mode & Notification Policy Card
             Surface(
                 shape = RoundedCornerShape(14.dp),
                 color = NavySurfaceElevated,
@@ -294,19 +309,69 @@ private fun BackgroundServiceControlCard(
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Text(
-                        text = "COMPACT FOREGROUND NOTIFICATION STATUS",
+                        text = "NOTIFICATION & BACKGROUND MODE",
                         style = MaterialTheme.typography.labelLarge,
                         color = EmeraldCharge,
                         fontWeight = FontWeight.Bold
                     )
 
                     Text(
-                        text = "Battery Boss Active • ${snapshot.percentage}%",
+                        text = if (isNoPersistentHourly) {
+                            "Clean Status Bar • 0 Persistent Notifications (${snapshot.percentage}%)"
+                        } else {
+                            "Battery Boss Active • ${snapshot.percentage}%"
+                        },
                         style = MaterialTheme.typography.titleSmall,
                         color = TextPrimary,
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.testTag("compact_notification_headline_preview")
                     )
+
+                    // Option 1: True No Persistent Notification (Hourly Check)
+                    OutlinedButton(
+                        onClick = {
+                            onSelectMonitoringMode(BackgroundMonitoringMode.NO_PERSISTENT_HOURLY)
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(54.dp)
+                            .testTag("mode_no_persistent_hourly_card"),
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = if (isNoPersistentHourly) EmeraldCharge.copy(alpha = 0.18f) else Color.Transparent
+                        ),
+                        border = BorderStroke(
+                            width = if (isNoPersistentHourly) 1.5.dp else 1.dp,
+                            color = if (isNoPersistentHourly) EmeraldCharge else NavyCardBorder
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.NotificationsOff,
+                                contentDescription = "No Persistent Notification Hourly Check",
+                                tint = if (isNoPersistentHourly) EmeraldCharge else TextSecondary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "No Persistent Notification (Hourly Check)",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = if (isNoPersistentHourly) EmeraldCharge else TextPrimary,
+                                    fontWeight = if (isNoPersistentHourly) FontWeight.Bold else FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = "Clean status bar • Instant charger events + 1-hour health check",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = TextSecondary
+                                )
+                            }
+                        }
+                    }
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -319,7 +384,7 @@ private fun BackgroundServiceControlCard(
                             },
                             modifier = Modifier
                                 .weight(1f)
-                                .height(46.dp)
+                                .height(48.dp)
                                 .testTag("mode_silent_background_card"),
                             shape = RoundedCornerShape(10.dp),
                             contentPadding = PaddingValues(horizontal = 8.dp),
@@ -346,33 +411,54 @@ private fun BackgroundServiceControlCard(
                             },
                             modifier = Modifier
                                 .weight(1f)
-                                .height(46.dp)
+                                .height(48.dp)
                                 .testTag("mode_continuous_foreground_card"),
                             shape = RoundedCornerShape(10.dp),
                             contentPadding = PaddingValues(horizontal = 8.dp),
                             colors = ButtonDefaults.outlinedButtonColors(
-                                containerColor = if (!isSilentSelected) ElectricCyan.copy(alpha = 0.18f) else Color.Transparent
+                                containerColor = if (isContinuousSelected) ElectricCyan.copy(alpha = 0.18f) else Color.Transparent
                             ),
                             border = BorderStroke(
-                                width = if (!isSilentSelected) 1.5.dp else 1.dp,
-                                color = if (!isSilentSelected) ElectricCyan else NavyCardBorder
+                                width = if (isContinuousSelected) 1.5.dp else 1.dp,
+                                color = if (isContinuousSelected) ElectricCyan else NavyCardBorder
                             )
                         ) {
                             Text(
-                                text = "Standard Channel\n(battery_boss_standard_channel)",
+                                text = "Continuous Foreground\n(Live Persistent Notif)",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = if (!isSilentSelected) ElectricCyan else TextSecondary,
-                                fontWeight = if (!isSilentSelected) FontWeight.Bold else FontWeight.Medium
+                                color = if (isContinuousSelected) ElectricCyan else TextSecondary,
+                                fontWeight = if (isContinuousSelected) FontWeight.Bold else FontWeight.Medium
                             )
                         }
                     }
 
+                    AnimatedVisibility(
+                        visible = isNoPersistentHourly,
+                        enter = fadeIn(tween(200)) + expandVertically(tween(200)),
+                        exit = fadeOut(tween(160)) + shrinkVertically(tween(160))
+                    ) {
+                        SettingSwitchRow(
+                            title = "Hourly Swipe-Dismissible Status Check",
+                            subtitle = if (settings.hourlyStatusNotificationEnabled) {
+                                "ON: Posts 1 auto-cancel, swipeable battery health alert every 60 minutes (never persistent)"
+                            } else {
+                                "OFF: Completely silent status bar — only instant charger voice & radio alerts run"
+                            },
+                            checked = settings.hourlyStatusNotificationEnabled,
+                            onCheckedChange = onToggleHourlyStatusNotification
+                        )
+                    }
+
                     Text(
-                        text = "Active Channel: ${channelDiagnostics.activeChannelId} • OS Importance: ${channelDiagnostics.activeImportanceLabel}",
+                        text = if (isNoPersistentHourly) {
+                            "Active Mode: No Persistent Notification (Hourly Check) • Channel: ${activeMode.channelId}"
+                        } else {
+                            "Active Channel: ${channelDiagnostics.activeChannelId} • OS Importance: ${channelDiagnostics.activeImportanceLabel}"
+                        },
                         style = MaterialTheme.typography.labelMedium,
-                        color = if (channelDiagnostics.isActiveChannelBlockedByUser) {
+                        color = if (!isNoPersistentHourly && channelDiagnostics.isActiveChannelBlockedByUser) {
                             ThermalCrimson
-                        } else if (isSilentSelected) {
+                        } else if (isNoPersistentHourly || isSilentSelected) {
                             EmeraldCharge
                         } else {
                             ElectricCyan
@@ -382,7 +468,7 @@ private fun BackgroundServiceControlCard(
                     )
 
                     Text(
-                        text = "FGS Active: ${if (isServiceRunning) "Yes (specialUse)" else "No"} • Starts: ${channelDiagnostics.serviceInstanceCreateCount} • In-Place Reposts: ${channelDiagnostics.inPlaceNotificationUpdatesCount} • JobScheduler: ${if (isJobSchedulerRegistered) "ID 4021" else "Standby"}",
+                        text = "FGS Active: ${if (isServiceRunning) "Yes (specialUse)" else "No (0 Persistent Notifications)"} • Starts: ${channelDiagnostics.serviceInstanceCreateCount} • JobScheduler: ${if (isJobSchedulerRegistered) (if (isNoPersistentHourly) "1-Hr Periodic (ID 4021)" else "ID 4021") else "Standby"}",
                         style = MaterialTheme.typography.bodySmall,
                         color = TextPrimary
                     )
@@ -394,7 +480,9 @@ private fun BackgroundServiceControlCard(
                         modifier = Modifier.testTag("os_notification_channels_summary")
                     )
 
-                    if (channelDiagnostics.isActiveChannelBlockedByUser || !channelDiagnostics.areAppNotificationsEnabledOnOs) {
+                    if (!isNoPersistentHourly &&
+                        (channelDiagnostics.isActiveChannelBlockedByUser || !channelDiagnostics.areAppNotificationsEnabledOnOs)
+                    ) {
                         Text(
                             text = "User Override Detected: Android System Notification Settings currently block notifications for this channel/app. Battery Boss respects your OS choice and will never bypass it.",
                             style = MaterialTheme.typography.labelSmall,
@@ -416,12 +504,15 @@ private fun BackgroundServiceControlCard(
             // 1. Background Monitoring ON/OFF
             SettingSwitchRow(
                 title = "1. Background Monitoring ON/OFF",
-                subtitle = if (settings.backgroundMonitoringEnabled && isServiceRunning) {
-                    "ON: BatteryMonitorService running as Foreground Service (Screen-Off Charger & Battery events active)"
-                } else {
-                    "OFF: BatteryMonitorService stopped, WakeLocks released & Notification removed"
+                subtitle = when {
+                    !isMonitoringActive ->
+                        "OFF: Background Service & JobScheduler stopped, WakeLocks released & Notifications removed"
+                    isNoPersistentHourly ->
+                        "ON (No Persistent Notification): Instant Charger Receiver + 1-Hr Periodic Check active"
+                    else ->
+                        "ON: BatteryMonitorService running as Foreground Service (Screen-Off Charger & Battery events active)"
                 },
-                checked = settings.backgroundMonitoringEnabled && isServiceRunning,
+                checked = isMonitoringActive,
                 onCheckedChange = { onToggleMonitoring(it) }
             )
 
@@ -440,10 +531,13 @@ private fun BackgroundServiceControlCard(
             // 3. Silent Notification Channel ON/OFF (reposting between two immutable channels)
             SettingSwitchRow(
                 title = "3. Silent Notification Channel (battery_boss_silent_channel)",
-                subtitle = if (isSilentSelected) {
-                    "ON -> Reposts Notification ID 4010 onto 'battery_boss_silent_channel' (created at IMPORTANCE_MIN, 0 buttons) without restarting Service; respects System Settings"
-                } else {
-                    "OFF -> Reposts Notification ID 4010 onto 'battery_boss_standard_channel' (created at IMPORTANCE_LOW + buttons) without restarting Service"
+                subtitle = when {
+                    isNoPersistentHourly ->
+                        "Currently in No Persistent Notification (1-Hr) mode. Turn ON to switch to Silent Foreground Channel."
+                    isSilentSelected ->
+                        "ON -> Reposts Notification ID 4010 onto 'battery_boss_silent_channel' (created at IMPORTANCE_MIN, 0 buttons) without restarting Service; respects System Settings"
+                    else ->
+                        "OFF -> Reposts Notification ID 4010 onto 'battery_boss_standard_channel' (created at IMPORTANCE_LOW + buttons) without restarting Service"
                 },
                 checked = isSilentSelected,
                 onCheckedChange = { silentOn ->

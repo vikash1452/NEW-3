@@ -28,6 +28,7 @@ import com.example.data.local.BatteryBossRepository
 import com.example.data.local.BatteryUsageHistoryEntity
 import com.example.data.preferences.SettingsDataStore
 import com.example.hardware.BatteryHardwareReader
+import com.example.hardware.ChargerRadioController
 import com.example.model.BackgroundMonitoringMode
 import com.example.model.BatteryHardwareSnapshot
 import com.example.model.BatterySaverMode
@@ -107,6 +108,9 @@ object BatteryTelemetryHub {
 
     private val _isScreenInteractive = MutableStateFlow(true)
     val isScreenInteractive: StateFlow<Boolean> = _isScreenInteractive.asStateFlow()
+
+    private val _isAppInForeground = MutableStateFlow(false)
+    val isAppInForeground: StateFlow<Boolean> = _isAppInForeground.asStateFlow()
 
     private val _lastNotificationActionHandled = MutableStateFlow("None")
     val lastNotificationActionHandled: StateFlow<String> = _lastNotificationActionHandled.asStateFlow()
@@ -201,6 +205,10 @@ object BatteryTelemetryHub {
 
     fun setScreenInteractive(interactive: Boolean) {
         _isScreenInteractive.value = interactive
+    }
+
+    fun setAppInForeground(inForeground: Boolean) {
+        _isAppInForeground.value = inForeground
     }
 
     fun recordNotificationActionHandled(action: String) {
@@ -445,6 +453,7 @@ class BatteryMonitorService : Service() {
         const val NOTIFICATION_ID = 4010
         const val ACTION_START_MONITORING = "com.example.action.START_MONITORING"
         const val ACTION_STOP_MONITORING = "com.example.action.STOP_MONITORING"
+        const val ACTION_STOP_FGS_ONLY = "com.example.action.STOP_FGS_ONLY"
         const val ACTION_SPEAK_NOW = "com.example.action.SPEAK_NOW"
         const val ACTION_STOP_SPEAKING = "com.example.action.STOP_SPEAKING"
         const val ACTION_MUTE_VOICE = "com.example.action.MUTE_VOICE"
@@ -548,6 +557,29 @@ class BatteryMonitorService : Service() {
                 appContext.stopService(intent)
             }
         }
+
+        /**
+         * Stops `BatteryMonitorService` completely and removes `NOTIFICATION_ID` (4010) while
+         * keeping `backgroundMonitoringEnabled = true` and `SilentBackgroundMonitorEngine` active
+         * for `NO_PERSISTENT_HOURLY` mode (0 persistent notifications + 1-hour JobScheduler check).
+         */
+        fun stopForegroundServiceOnly(context: Context) {
+            val appContext = context.applicationContext
+            BatteryTelemetryHub.setForegroundNotificationVisible(false)
+            runCatching {
+                val nm = appContext.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                nm?.cancel(NOTIFICATION_ID)
+            }
+            val running = activeInstance
+            if (running != null) {
+                running.executeStopForegroundServiceOnly()
+            } else {
+                val intent = buildServiceActionIntent(appContext, ACTION_STOP_FGS_ONLY)
+                runCatching {
+                    appContext.stopService(intent)
+                }
+            }
+        }
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -645,16 +677,14 @@ class BatteryMonitorService : Service() {
                 val prevMode = currentSettings.batterySaverMode
                 val prevPreset = currentSettings.activePreset
                 currentSettings = s
+                if (s.backgroundMonitoringMode == BackgroundMonitoringMode.NO_PERSISTENT_HOURLY) {
+                    executeStopForegroundServiceOnly()
+                    return@collect
+                }
                 voiceAssistant.ensureEngineAliveAndSyncSettings(s)
                 BatteryTelemetryHub.setGraphSampleInterval(s.batterySaverMode.graphSampleIntervalMs)
                 BatteryTelemetryHub.setSilentBackgroundActive(s.silentNotificationEnabled)
-                BatteryTelemetryHub.setActiveMonitoringMode(
-                    if (s.silentNotificationEnabled) {
-                        BackgroundMonitoringMode.SILENT_BACKGROUND
-                    } else {
-                        BackgroundMonitoringMode.CONTINUOUS_FOREGROUND
-                    }
-                )
+                BatteryTelemetryHub.setActiveMonitoringMode(s.backgroundMonitoringMode)
                 if (BatteryTelemetryHub.isServiceRunning.value) {
                     BatteryTelemetryHub.setForegroundNotificationVisible(true)
                 }
@@ -701,6 +731,10 @@ class BatteryMonitorService : Service() {
         when (action) {
             ACTION_STOP_MONITORING -> {
                 executeStopMonitoringCleanly()
+                return START_NOT_STICKY
+            }
+            ACTION_STOP_FGS_ONLY -> {
+                executeStopForegroundServiceOnly()
                 return START_NOT_STICKY
             }
             ACTION_SPEAK_NOW -> {
@@ -850,6 +884,33 @@ class BatteryMonitorService : Service() {
     }
 
     /**
+     * Stops only this Foreground Service and clears `NOTIFICATION_ID = 4010` when switching to
+     * `BackgroundMonitoringMode.NO_PERSISTENT_HOURLY` (keeps monitoring enabled & JobScheduler active).
+     */
+    private fun executeStopForegroundServiceOnly() {
+        tickerJob?.cancel()
+        tickerJob = null
+        powerEventRefreshJob?.cancel()
+        powerEventRefreshJob = null
+
+        if (isReceiverRegistered) {
+            runCatching { unregisterReceiver(batteryBroadcastReceiver) }
+            isReceiverRegistered = false
+        }
+
+        BatteryTelemetryHub.setForegroundNotificationVisible(false)
+        runCatching {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        }
+        runCatching {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            nm?.cancel(NOTIFICATION_ID)
+        }
+        activeInstance = null
+        stopSelf()
+    }
+
+    /**
      * Handles ACTION_POWER_CONNECTED / ACTION_POWER_DISCONNECTED with ultra-low latency (< 200ms):
      * acquires a bounded PARTIAL_WAKE_LOCK (<= 3,000ms), immediately uses cached settings + cached
      * UpdateLock state (zero blocking network call, zero artificial sleep), triggers speech FIRST,
@@ -889,6 +950,13 @@ class BatteryMonitorService : Service() {
                     persistSnapshotToDatabaseAsync(alignedSnap, fastSettings)
                 }
                 if (action == Intent.ACTION_POWER_CONNECTED) {
+                    if (fastSettings.autoDisableRadiosOnChargeEnabled) {
+                        ChargerRadioController.onChargerConnected(
+                            context = applicationContext,
+                            settings = fastSettings,
+                            isAppInForeground = BatteryTelemetryHub.isAppInForeground.value
+                        )
+                    }
                     serviceScope.launch(Dispatchers.IO) {
                         val refreshedLocked = UpdateLockManager.refreshIfStaleAndCheckLocked(applicationContext)
                         if (refreshedLocked) {
@@ -896,6 +964,7 @@ class BatteryMonitorService : Service() {
                         }
                     }
                 } else if (action == Intent.ACTION_POWER_DISCONNECTED) {
+                    ChargerRadioController.cancelChargerRadioNotification(applicationContext)
                     voiceAssistant.prewarmChargerAnnouncement(alignedSnap)
                 }
             } finally {

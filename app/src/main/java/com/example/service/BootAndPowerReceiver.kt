@@ -56,10 +56,14 @@ class BootAndPowerReceiver : BroadcastReceiver() {
                                 batteryIntent = null,
                                 settingsOverride = settings
                             )
-                            BatteryMonitorService.startService(
-                                context = appContext,
-                                triggerEvent = action
-                            )
+                            // Only launch Foreground Service when user selected a persistent-notification FGS mode;
+                            // in NO_PERSISTENT_HOURLY mode keep 0 persistent notifications!
+                            if (settings.backgroundMonitoringMode.usesForegroundService) {
+                                BatteryMonitorService.startService(
+                                    context = appContext,
+                                    triggerEvent = action
+                                )
+                            }
                         }
                     }
                 }

@@ -91,8 +91,14 @@ class SettingsDataStore(private val context: Context) {
         val BACKGROUND_MONITORING_MODE = stringPreferencesKey("background_monitoring_mode")
         val VOICE_ANNOUNCEMENTS_ENABLED = booleanPreferencesKey("voice_announcements_enabled")
         val SILENT_NOTIFICATION_ENABLED = booleanPreferencesKey("silent_notification_enabled")
+        val HOURLY_STATUS_NOTIFICATION_ENABLED = booleanPreferencesKey("hourly_status_notification_enabled")
         val START_ON_BOOT = booleanPreferencesKey("start_on_boot_enabled")
         val PERSISTENT_NOTIFICATION = booleanPreferencesKey("persistent_notification_enabled")
+
+        // Auto-Off Bluetooth / Wi-Fi / Mobile Data on Charger Connect
+        val AUTO_DISABLE_RADIOS_ON_CHARGE = booleanPreferencesKey("auto_disable_radios_on_charge_enabled")
+        val AUTO_DISABLE_BT_ON_CHARGE = booleanPreferencesKey("auto_disable_bluetooth_on_charge")
+        val AUTO_DISABLE_WIFI_DATA_ON_CHARGE = booleanPreferencesKey("auto_disable_wifi_and_data_on_charge")
 
         // Smart Battery Saver & Auto Management Keys
         val BATTERY_SAVER_MODE = stringPreferencesKey("battery_saver_mode")
@@ -214,8 +220,13 @@ class SettingsDataStore(private val context: Context) {
             voiceAnnouncementsEnabled = prefs[Keys.VOICE_ANNOUNCEMENTS_ENABLED] ?: true,
             silentNotificationEnabled = prefs[Keys.SILENT_NOTIFICATION_ENABLED]
                 ?: (monitoringMode == BackgroundMonitoringMode.SILENT_BACKGROUND),
+            hourlyStatusNotificationEnabled = prefs[Keys.HOURLY_STATUS_NOTIFICATION_ENABLED] ?: true,
             startOnBootEnabled = prefs[Keys.START_ON_BOOT] ?: true,
-            persistentNotificationEnabled = prefs[Keys.PERSISTENT_NOTIFICATION] ?: true,
+            persistentNotificationEnabled = prefs[Keys.PERSISTENT_NOTIFICATION]
+                ?: monitoringMode.requiresPersistentNotification,
+            autoDisableRadiosOnChargeEnabled = prefs[Keys.AUTO_DISABLE_RADIOS_ON_CHARGE] ?: false,
+            autoDisableBluetoothOnCharge = prefs[Keys.AUTO_DISABLE_BT_ON_CHARGE] ?: true,
+            autoDisableWifiAndDataOnCharge = prefs[Keys.AUTO_DISABLE_WIFI_DATA_ON_CHARGE] ?: true,
 
             batterySaverMode = saverMode,
             autoBatterySaverEnabled = prefs[Keys.AUTO_BATTERY_SAVER_ENABLED] ?: false,
@@ -437,7 +448,7 @@ class SettingsDataStore(private val context: Context) {
             monitoringMode?.let { mode ->
                 prefs[Keys.BACKGROUND_MONITORING_MODE] = mode.name
                 prefs[Keys.SILENT_NOTIFICATION_ENABLED] = (mode == BackgroundMonitoringMode.SILENT_BACKGROUND)
-                prefs[Keys.PERSISTENT_NOTIFICATION] = true
+                prefs[Keys.PERSISTENT_NOTIFICATION] = mode.requiresPersistentNotification
             }
         }
     }
@@ -446,7 +457,25 @@ class SettingsDataStore(private val context: Context) {
         context.dataStore.edit { prefs ->
             prefs[Keys.BACKGROUND_MONITORING_MODE] = mode.name
             prefs[Keys.SILENT_NOTIFICATION_ENABLED] = (mode == BackgroundMonitoringMode.SILENT_BACKGROUND)
-            prefs[Keys.PERSISTENT_NOTIFICATION] = true
+            prefs[Keys.PERSISTENT_NOTIFICATION] = mode.requiresPersistentNotification
+        }
+    }
+
+    suspend fun updateHourlyStatusNotificationEnabled(enabled: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.HOURLY_STATUS_NOTIFICATION_ENABLED] = enabled
+        }
+    }
+
+    suspend fun updateAutoDisableRadiosSettings(
+        enabled: Boolean? = null,
+        disableBluetooth: Boolean? = null,
+        disableWifiAndData: Boolean? = null
+    ) {
+        context.dataStore.edit { prefs ->
+            enabled?.let { prefs[Keys.AUTO_DISABLE_RADIOS_ON_CHARGE] = it }
+            disableBluetooth?.let { prefs[Keys.AUTO_DISABLE_BT_ON_CHARGE] = it }
+            disableWifiAndData?.let { prefs[Keys.AUTO_DISABLE_WIFI_DATA_ON_CHARGE] = it }
         }
     }
 
@@ -458,6 +487,7 @@ class SettingsDataStore(private val context: Context) {
             } else {
                 BackgroundMonitoringMode.CONTINUOUS_FOREGROUND.name
             }
+            prefs[Keys.PERSISTENT_NOTIFICATION] = true
         }
     }
 

@@ -140,6 +140,7 @@ import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.ui.components.AppUpdateOverlay
 import com.example.ui.theme.ThermalCrimson
+import com.example.service.BatteryTelemetryHub
 import com.example.update.AppUpdateInfo
 import com.example.update.UpdateFetchResult
 import com.example.update.UpdateLockManager
@@ -169,6 +170,16 @@ class MainActivity : ComponentActivity() {
                 BatteryBossEntryScreen()
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        BatteryTelemetryHub.setAppInForeground(true)
+    }
+
+    override fun onStop() {
+        BatteryTelemetryHub.setAppInForeground(false)
+        super.onStop()
     }
 }
 
@@ -765,7 +776,12 @@ fun BatteryBossApp(
     val selectedAppHistoryRecords by viewModel.selectedAppHistoryRecords.collectAsStateWithLifecycle()
     val isIgnoringOptimizations by viewModel.isIgnoringBatteryOptimizations.collectAsStateWithLifecycle()
 
-    LaunchedEffect(settings.silentNotificationEnabled, settings.backgroundMonitoringEnabled, isServiceRunning) {
+    LaunchedEffect(
+        settings.silentNotificationEnabled,
+        settings.backgroundMonitoringEnabled,
+        settings.backgroundMonitoringMode,
+        isServiceRunning
+    ) {
         viewModel.refreshNotificationChannelDiagnostics()
     }
 
@@ -777,6 +793,12 @@ fun BatteryBossApp(
         if (isGranted && settings.backgroundMonitoringEnabled) {
             viewModel.toggleBackgroundMonitoring(true)
         }
+    }
+
+    val bluetoothConnectPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { _ ->
+        // Permission outcome is handled safely by ChargerRadioController when charger connects.
     }
 
     LaunchedEffect(settings.backgroundMonitoringMode) {
@@ -1079,6 +1101,7 @@ fun BatteryBossApp(
                         settings = settings,
                         isServiceRunning = isServiceRunning,
                         isForegroundNotificationVisible = isForegroundNotificationVisible,
+                        isSilentBackgroundActive = isSilentBackgroundActive,
                         isSpeaking = isSpeaking,
                         engineStatusText = engineStatusText,
                         lastSpokenBanner = lastSpokenBanner,
@@ -1112,6 +1135,47 @@ fun BatteryBossApp(
                         onToggleSilentNotification = { enable ->
                             viewModel.toggleSilentNotificationEnabled(enable)
                         },
+                        onToggleHourlyStatusNotification = { enable ->
+                            if (enable && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                val hasPerm = ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.POST_NOTIFICATIONS
+                                ) == PackageManager.PERMISSION_GRANTED
+                                if (!hasPerm) {
+                                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                }
+                            }
+                            viewModel.updateHourlyStatusNotificationEnabled(enable)
+                        },
+                        onUpdateAutoDisableRadios = { enabled, disableBt, disableWifiData ->
+                            val willBeEnabled = enabled ?: settings.autoDisableRadiosOnChargeEnabled
+                            val willDisableBt = disableBt ?: settings.autoDisableBluetoothOnCharge
+                            val willPromptInternet = disableWifiData ?: settings.autoDisableWifiAndDataOnCharge
+                            if (willBeEnabled && willDisableBt && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                val hasBtPerm = ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.BLUETOOTH_CONNECT
+                                ) == PackageManager.PERMISSION_GRANTED
+                                if (!hasBtPerm) {
+                                    bluetoothConnectPermissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+                                }
+                            }
+                            if (willBeEnabled && willPromptInternet && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                val hasNotifPerm = ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.POST_NOTIFICATIONS
+                                ) == PackageManager.PERMISSION_GRANTED
+                                if (!hasNotifPerm) {
+                                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                }
+                            }
+                            viewModel.updateAutoDisableRadiosSettings(
+                                enabled = enabled,
+                                disableBluetooth = disableBt,
+                                disableWifiAndData = disableWifiData
+                            )
+                        },
+                        onOpenInternetPanel = { viewModel.openInternetConnectivityPanel() },
                         onToggleVoiceAnnouncements = { enable ->
                             viewModel.toggleVoiceAnnouncementsEnabled(enable)
                         },
@@ -1276,6 +1340,18 @@ fun BatteryBossApp(
                             viewModel.setBackgroundMonitoringMode(mode)
                         },
                         onToggleSilentNotification = { viewModel.toggleSilentNotificationEnabled(it) },
+                        onToggleHourlyStatusNotification = { enable ->
+                            if (enable && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                val hasPerm = ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.POST_NOTIFICATIONS
+                                ) == PackageManager.PERMISSION_GRANTED
+                                if (!hasPerm) {
+                                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                }
+                            }
+                            viewModel.updateHourlyStatusNotificationEnabled(enable)
+                        },
                         onToggleVoiceAnnouncements = { viewModel.toggleVoiceAnnouncementsEnabled(it) },
                         onTriggerNotificationAction = { viewModel.triggerNotificationAction(it) },
                         onUpdateBackgroundSettings = { boot, notif ->

@@ -40,19 +40,24 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.automirrored.filled.ShowChart
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.BatteryFull
 import androidx.compose.material.icons.filled.BatteryStd
+import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.ElectricBolt
 import androidx.compose.material.icons.filled.HealthAndSafety
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Thermostat
+import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -120,12 +125,16 @@ fun DashboardScreen(
     settings: UserSettings,
     isServiceRunning: Boolean,
     isForegroundNotificationVisible: Boolean = false,
+    isSilentBackgroundActive: Boolean = false,
     isSpeaking: Boolean,
     engineStatusText: String,
     lastSpokenBanner: String?,
     onToggleMonitoring: (Boolean) -> Unit,
     onSelectMonitoringMode: (BackgroundMonitoringMode) -> Unit = {},
     onToggleSilentNotification: (Boolean) -> Unit = {},
+    onToggleHourlyStatusNotification: (Boolean) -> Unit = {},
+    onUpdateAutoDisableRadios: (Boolean?, Boolean?, Boolean?) -> Unit = { _, _, _ -> },
+    onOpenInternetPanel: () -> Unit = {},
     onToggleVoiceAnnouncements: (Boolean) -> Unit = {},
     onTriggerNotificationAction: (String) -> Unit = {},
     onSpeakStatusNow: () -> Unit,
@@ -136,6 +145,9 @@ fun DashboardScreen(
     onOpenSmartTracker: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val isMonitoringActive = isServiceRunning ||
+        (settings.backgroundMonitoringEnabled && isSilentBackgroundActive)
+
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
@@ -143,14 +155,16 @@ fun DashboardScreen(
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // 1. Top Telemetry Hero Banner + 3 Independent Controls (Background Monitoring, Background Voice, Silent Notification)
+        // 1. Top Telemetry Hero Banner + Monitoring Modes (No Persistent Hourly / Silent FGS / Standard FGS)
         item {
             HeroTelemetryCard(
                 percentage = snapshot.percentage,
+                isMonitoringActive = isMonitoringActive,
                 isServiceRunning = isServiceRunning,
                 isForegroundNotificationVisible = isForegroundNotificationVisible,
                 monitoringMode = settings.backgroundMonitoringMode,
                 silentNotificationEnabled = settings.silentNotificationEnabled,
+                hourlyStatusNotificationEnabled = settings.hourlyStatusNotificationEnabled,
                 isCharging = snapshot.isCharging,
                 disableAnimations = settings.batterySaverMode.disableAnimations,
                 voiceAnnouncementsEnabled = settings.voiceAnnouncementsEnabled,
@@ -158,6 +172,7 @@ fun DashboardScreen(
                 onToggleMonitoring = onToggleMonitoring,
                 onSelectMonitoringMode = onSelectMonitoringMode,
                 onToggleSilentNotification = onToggleSilentNotification,
+                onToggleHourlyStatusNotification = onToggleHourlyStatusNotification,
                 onToggleVoiceAnnouncements = onToggleVoiceAnnouncements,
                 onTriggerNotificationAction = onTriggerNotificationAction,
                 onRefreshTelemetry = onRefreshTelemetry
@@ -192,7 +207,16 @@ fun DashboardScreen(
             }
         }
 
-        // 4. Compact Smart Battery Tracker & App Power Manager Card (Requirement 10)
+        // 4. Auto-Off Data, Wi-Fi & BT on Charge Card
+        item {
+            AutoOffRadiosOnChargeCard(
+                settings = settings,
+                onUpdateAutoDisableRadios = onUpdateAutoDisableRadios,
+                onOpenInternetPanel = onOpenInternetPanel
+            )
+        }
+
+        // 5. Compact Smart Battery Tracker & App Power Manager Card (Requirement 10)
         item {
             HomeSmartBatteryTrackerCard(
                 snapshot = snapshot,
@@ -249,10 +273,12 @@ fun DashboardScreen(
 @Composable
 private fun HeroTelemetryCard(
     percentage: Int,
+    isMonitoringActive: Boolean,
     isServiceRunning: Boolean,
     isForegroundNotificationVisible: Boolean,
     monitoringMode: BackgroundMonitoringMode,
     silentNotificationEnabled: Boolean,
+    hourlyStatusNotificationEnabled: Boolean,
     isCharging: Boolean,
     disableAnimations: Boolean = false,
     voiceAnnouncementsEnabled: Boolean,
@@ -260,13 +286,19 @@ private fun HeroTelemetryCard(
     onToggleMonitoring: (Boolean) -> Unit,
     onSelectMonitoringMode: (BackgroundMonitoringMode) -> Unit,
     onToggleSilentNotification: (Boolean) -> Unit,
+    onToggleHourlyStatusNotification: (Boolean) -> Unit,
     onToggleVoiceAnnouncements: (Boolean) -> Unit,
     onTriggerNotificationAction: (String) -> Unit,
     onRefreshTelemetry: () -> Unit
 ) {
-    val isSilentMode = silentNotificationEnabled || monitoringMode == BackgroundMonitoringMode.SILENT_BACKGROUND
+    val isNoPersistentHourly = monitoringMode == BackgroundMonitoringMode.NO_PERSISTENT_HOURLY
+    val isSilentMode = !isNoPersistentHourly &&
+        (silentNotificationEnabled || monitoringMode == BackgroundMonitoringMode.SILENT_BACKGROUND)
+    val isContinuousMode = !isNoPersistentHourly && !isSilentMode
+
     val statusHeadline = when {
-        !isServiceRunning -> "MONITOR STOPPED"
+        !isMonitoringActive -> "MONITOR STOPPED"
+        isNoPersistentHourly -> "Battery Boss Active • $percentage% (NO NOTIF • 1-HR)"
         isSilentMode -> "Battery Boss Active • $percentage% (SILENT FGS)"
         else -> "Battery Boss Active • $percentage% (STANDARD FGS)"
     }
@@ -344,7 +376,7 @@ private fun HeroTelemetryCard(
                                 contentAlignment = Alignment.Center,
                                 modifier = Modifier.size(18.dp)
                             ) {
-                                if (isServiceRunning && !disableAnimations) {
+                                if (isMonitoringActive && !disableAnimations) {
                                     Box(
                                         modifier = Modifier
                                             .size(18.dp)
@@ -362,13 +394,13 @@ private fun HeroTelemetryCard(
                                     modifier = Modifier
                                         .size(10.dp)
                                         .clip(CircleShape)
-                                        .background(if (isServiceRunning) EmeraldCharge else AmberWarning)
+                                        .background(if (isMonitoringActive) EmeraldCharge else AmberWarning)
                                 )
                             }
                             Text(
                                 text = statusHeadline,
                                 style = MaterialTheme.typography.labelLarge,
-                                color = if (isServiceRunning) EmeraldCharge else AmberWarning,
+                                color = if (isMonitoringActive) EmeraldCharge else AmberWarning,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.testTag("hero_monitoring_status_text")
@@ -392,7 +424,7 @@ private fun HeroTelemetryCard(
                                 )
                             }
                             Switch(
-                                checked = isServiceRunning,
+                                checked = isMonitoringActive,
                                 onCheckedChange = onToggleMonitoring,
                                 modifier = Modifier.testTag("monitoring_master_switch"),
                                 colors = SwitchDefaults.colors(
@@ -444,14 +476,16 @@ private fun HeroTelemetryCard(
                         )
                         Text(
                             text = when {
-                                !isServiceRunning -> "Foreground Service: OFF (0 Notifications)"
+                                !isMonitoringActive -> "Background Monitor: OFF (0 Notifications)"
+                                isNoPersistentHourly ->
+                                    "0 Persistent Notifications • Instant Charger Voice + 1-Hr Check (${if (hourlyStatusNotificationEnabled) "Hourly Alert ON" else "Silent"})"
                                 isSilentMode ->
                                     "Channel 'battery_boss_silent_channel': \"Battery Boss Active • $percentage%\" (Reposted In-Place)"
                                 else ->
                                     "Channel 'battery_boss_standard_channel': \"Battery Boss Active • $percentage%\" (+Buttons)"
                             },
                             style = MaterialTheme.typography.labelSmall,
-                            color = if (isSilentMode) ElectricCyan else TextSecondary,
+                            color = if (isNoPersistentHourly || isSilentMode) ElectricCyan else TextSecondary,
                             modifier = Modifier.testTag("hero_notification_status_text")
                         )
                     }
@@ -465,6 +499,42 @@ private fun HeroTelemetryCard(
                             uncheckedThumbColor = TextSecondary,
                             uncheckedTrackColor = NavySurfaceElevated
                         )
+                    )
+                }
+
+                // Mode Selector: True No-Persistent-Notification (1-Hr Check) vs Silent FGS vs Standard FGS
+                OutlinedButton(
+                    onClick = {
+                        onSelectMonitoringMode(BackgroundMonitoringMode.NO_PERSISTENT_HOURLY)
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(40.dp)
+                        .testTag("hero_mode_no_persistent_hourly_button"),
+                    shape = RoundedCornerShape(10.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = if (isNoPersistentHourly) EmeraldCharge.copy(alpha = 0.18f) else Color.Transparent
+                    ),
+                    border = BorderStroke(
+                        if (isNoPersistentHourly) 1.5.dp else 1.dp,
+                        if (isNoPersistentHourly) EmeraldCharge else NavyCardBorder
+                    )
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.NotificationsOff,
+                        contentDescription = "No persistent notification hourly check",
+                        tint = if (isNoPersistentHourly) EmeraldCharge else TextSecondary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "NO PERSISTENT NOTIFICATION (HOURLY CHECK)",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (isNoPersistentHourly) EmeraldCharge else TextSecondary,
+                        fontWeight = if (isNoPersistentHourly) FontWeight.Bold else FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
@@ -482,7 +552,7 @@ private fun HeroTelemetryCard(
                         },
                         modifier = Modifier
                             .weight(1f)
-                            .height(34.dp)
+                            .height(36.dp)
                             .testTag("hero_mode_silent_background_button"),
                         shape = RoundedCornerShape(8.dp),
                         contentPadding = PaddingValues(horizontal = 6.dp),
@@ -511,23 +581,23 @@ private fun HeroTelemetryCard(
                         },
                         modifier = Modifier
                             .weight(1f)
-                            .height(34.dp)
+                            .height(36.dp)
                             .testTag("hero_mode_continuous_foreground_button"),
                         shape = RoundedCornerShape(8.dp),
                         contentPadding = PaddingValues(horizontal = 6.dp),
                         colors = ButtonDefaults.outlinedButtonColors(
-                            containerColor = if (!isSilentMode) ElectricCyan.copy(alpha = 0.16f) else Color.Transparent
+                            containerColor = if (isContinuousMode) ElectricCyan.copy(alpha = 0.16f) else Color.Transparent
                         ),
                         border = BorderStroke(
                             1.dp,
-                            if (!isSilentMode) ElectricCyan else NavyCardBorder
+                            if (isContinuousMode) ElectricCyan else NavyCardBorder
                         )
                     ) {
                         Text(
-                            text = "STANDARD CHANNEL",
+                            text = "CONTINUOUS FGS",
                             style = MaterialTheme.typography.labelSmall,
-                            color = if (!isSilentMode) ElectricCyan else TextSecondary,
-                            fontWeight = if (!isSilentMode) FontWeight.Bold else FontWeight.Medium,
+                            color = if (isContinuousMode) ElectricCyan else TextSecondary,
+                            fontWeight = if (isContinuousMode) FontWeight.Bold else FontWeight.Medium,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -540,20 +610,20 @@ private fun HeroTelemetryCard(
                 ) {
                     OutlinedButton(
                         onClick = {
-                            onToggleMonitoring(!isServiceRunning)
+                            onToggleMonitoring(!isMonitoringActive)
                         },
                         modifier = Modifier
                             .weight(1f)
-                            .height(34.dp)
+                            .height(36.dp)
                             .testTag("quick_notif_toggle_monitoring_button"),
                         shape = RoundedCornerShape(8.dp),
                         contentPadding = PaddingValues(horizontal = 6.dp),
-                        border = BorderStroke(1.dp, if (isServiceRunning) ThermalCrimson.copy(alpha = 0.7f) else EmeraldCharge)
+                        border = BorderStroke(1.dp, if (isMonitoringActive) ThermalCrimson.copy(alpha = 0.7f) else EmeraldCharge)
                     ) {
                         Text(
-                            text = if (isServiceRunning) "STOP MONITOR" else "START MONITOR",
+                            text = if (isMonitoringActive) "STOP MONITOR" else "START MONITOR",
                             style = MaterialTheme.typography.labelSmall,
-                            color = if (isServiceRunning) ThermalCrimson else EmeraldCharge,
+                            color = if (isMonitoringActive) ThermalCrimson else EmeraldCharge,
                             fontWeight = FontWeight.Bold
                         )
                     }
@@ -564,7 +634,7 @@ private fun HeroTelemetryCard(
                         },
                         modifier = Modifier
                             .weight(1f)
-                            .height(34.dp)
+                            .height(36.dp)
                             .testTag("quick_notif_mute_resume_voice_button"),
                         shape = RoundedCornerShape(8.dp),
                         contentPadding = PaddingValues(horizontal = 6.dp),
@@ -1673,6 +1743,242 @@ private fun TelemetryMetricCard(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+        }
+    }
+}
+
+@Composable
+private fun AutoOffRadiosOnChargeCard(
+    settings: UserSettings,
+    onUpdateAutoDisableRadios: (Boolean?, Boolean?, Boolean?) -> Unit,
+    onOpenInternetPanel: () -> Unit
+) {
+    val isEnabled = settings.autoDisableRadiosOnChargeEnabled
+    val cardBorderColor by animateColorAsState(
+        targetValue = if (isEnabled) EmeraldCharge.copy(alpha = 0.55f) else NavyCardBorder,
+        animationSpec = tween(260),
+        label = "auto_off_radios_border"
+    )
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("auto_off_radios_on_charge_card"),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = NavySurface),
+        border = BorderStroke(1.dp, cardBorderColor)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Surface(
+                        shape = CircleShape,
+                        color = if (isEnabled) EmeraldCharge.copy(alpha = 0.16f) else NavySurfaceElevated,
+                        border = BorderStroke(
+                            1.dp,
+                            if (isEnabled) EmeraldCharge.copy(alpha = 0.5f) else NavyCardBorder
+                        ),
+                        modifier = Modifier.size(40.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Default.Wifi,
+                                contentDescription = "Auto-Off Data, Wi-Fi and Bluetooth on Charge",
+                                tint = if (isEnabled) EmeraldCharge else ElectricCyan,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Auto-Off Data, Wi-Fi & BT on Charge",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = TextPrimary,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = if (isEnabled) {
+                                "Active: Faster, cooler charging when plugged in"
+                            } else {
+                                "Turn ON to save power & heat while charging"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (isEnabled) EmeraldCharge else TextSecondary
+                        )
+                    }
+                }
+                Switch(
+                    checked = isEnabled,
+                    onCheckedChange = { onUpdateAutoDisableRadios(it, null, null) },
+                    modifier = Modifier.testTag("auto_off_radios_master_switch"),
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color(0xFF00210E),
+                        checkedTrackColor = EmeraldCharge,
+                        uncheckedThumbColor = TextSecondary,
+                        uncheckedTrackColor = NavySurfaceElevated
+                    )
+                )
+            }
+
+            AnimatedVisibility(
+                visible = isEnabled,
+                enter = fadeIn(tween(220)) + expandVertically(tween(220)),
+                exit = fadeOut(tween(180)) + shrinkVertically(tween(180))
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    HorizontalDivider(color = NavyCardBorder.copy(alpha = 0.6f))
+
+                    // Sub-toggle 1: Bluetooth Auto-Off
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Bluetooth,
+                                contentDescription = "Bluetooth auto-off",
+                                tint = ElectricCyan,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Column {
+                                Text(
+                                    text = "Auto-Disable Bluetooth",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = TextPrimary
+                                )
+                                Text(
+                                    text = "Disables Bluetooth on connect (uses BLUETOOTH_CONNECT; Android 13+ may open quick settings)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = TextSecondary
+                                )
+                            }
+                        }
+                        Switch(
+                            checked = settings.autoDisableBluetoothOnCharge,
+                            onCheckedChange = { onUpdateAutoDisableRadios(null, it, null) },
+                            modifier = Modifier.testTag("auto_off_bluetooth_switch"),
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color(0xFF00210E),
+                                checkedTrackColor = ElectricCyan,
+                                uncheckedThumbColor = TextSecondary,
+                                uncheckedTrackColor = NavySurfaceElevated
+                            )
+                        )
+                    }
+
+                    // Sub-toggle 2: Wi-Fi & Mobile Data 1-Tap Internet Panel Prompt
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Wifi,
+                                contentDescription = "Wi-Fi and Mobile Data quick-off panel",
+                                tint = EmeraldCharge,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Column {
+                                Text(
+                                    text = "Wi-Fi & Mobile Data Quick-Off Alert",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = TextPrimary
+                                )
+                                Text(
+                                    text = "Posts 1-tap 'Open Internet Panel' notification (or opens panel directly when app is open)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = TextSecondary
+                                )
+                            }
+                        }
+                        Switch(
+                            checked = settings.autoDisableWifiAndDataOnCharge,
+                            onCheckedChange = { onUpdateAutoDisableRadios(null, null, it) },
+                            modifier = Modifier.testTag("auto_off_wifi_data_switch"),
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color(0xFF00210E),
+                                checkedTrackColor = EmeraldCharge,
+                                uncheckedThumbColor = TextSecondary,
+                                uncheckedTrackColor = NavySurfaceElevated
+                            )
+                        )
+                    }
+
+                    OutlinedButton(
+                        onClick = onOpenInternetPanel,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("open_internet_panel_button"),
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, ElectricCyan.copy(alpha = 0.7f))
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+                            contentDescription = "Open Internet Panel",
+                            tint = ElectricCyan,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "OPEN INTERNET PANEL NOW",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = ElectricCyan
+                        )
+                    }
+                }
+            }
+
+            // Honest Android OS limitation note (always clearly visible under the toggle)
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = NavySurfaceElevated,
+                border = BorderStroke(1.dp, NavyCardBorder.copy(alpha = 0.7f))
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Info,
+                        contentDescription = "Android OS radio toggle limitation",
+                        tint = PurpleVoiceAccent,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = "Android 10+ security rules block apps from toggling Wi-Fi or Mobile Data silently in the background. When you plug in your charger, Battery Boss automatically attempts to turn off Bluetooth and pops a 1-tap Internet Panel prompt so you can switch off Wi-Fi & Mobile Data immediately.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextSecondary,
+                        modifier = Modifier.testTag("auto_off_radios_os_note")
+                    )
+                }
+            }
         }
     }
 }

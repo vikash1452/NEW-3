@@ -2125,4 +2125,150 @@ class ExampleRobolectricTest {
             com.example.service.BatteryTelemetryHub.buildSelfPowerAuditReport(com.example.model.BatterySaverMode.NORMAL).activeHeldWakeLocksCount
         )
     }
+
+    @Test
+    fun testFeature1AutoOffRadiosOnChargeAndFeature2NoPersistentHourlyMode() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+        val shadowNotificationManager = org.robolectric.Shadows.shadowOf(notificationManager)
+        val jobScheduler = context.getSystemService(Context.JOB_SCHEDULER_SERVICE) as android.app.job.JobScheduler
+        val dataStore = com.example.data.preferences.SettingsDataStore(context)
+
+        // 1. Verify BLUETOOTH_CONNECT is declared in AndroidManifest.xml
+        val pkgInfo = context.packageManager.getPackageInfo(
+            context.packageName,
+            android.content.pm.PackageManager.GET_PERMISSIONS
+        )
+        val requestedPermissions = pkgInfo.requestedPermissions?.toSet().orEmpty()
+        assertTrue(
+            "AndroidManifest must declare BLUETOOTH_CONNECT for Android 12+",
+            requestedPermissions.contains(android.Manifest.permission.BLUETOOTH_CONNECT)
+        )
+
+        // 2. Feature 1 disabled -> ChargerRadioController is a no-op
+        com.example.hardware.ChargerRadioController.resetDebounceForTest()
+        val disabledResult = com.example.hardware.ChargerRadioController.onChargerConnected(
+            context = context,
+            settings = com.example.model.UserSettings(autoDisableRadiosOnChargeEnabled = false),
+            isAppInForeground = false,
+            bypassDebounce = true
+        )
+        assertFalse(disabledResult.featureEnabled)
+        assertFalse(disabledResult.internetPanelNotificationPosted)
+        assertNull(
+            shadowNotificationManager.getNotification(
+                com.example.hardware.ChargerRadioController.NOTIFICATION_ID_CHARGER_RADIOS
+            )
+        )
+
+        // 3. Feature 1 enabled -> Posts high-priority auto-cancel notification with "Open Internet Panel" action
+        val enabledResult = com.example.hardware.ChargerRadioController.onChargerConnected(
+            context = context,
+            settings = com.example.model.UserSettings(
+                autoDisableRadiosOnChargeEnabled = true,
+                autoDisableBluetoothOnCharge = true,
+                autoDisableWifiAndDataOnCharge = true
+            ),
+            isAppInForeground = false,
+            bypassDebounce = true
+        )
+        assertTrue(enabledResult.featureEnabled)
+        assertTrue(enabledResult.internetPanelNotificationPosted)
+        val radioNotif = shadowNotificationManager.getNotification(
+            com.example.hardware.ChargerRadioController.NOTIFICATION_ID_CHARGER_RADIOS
+        )
+        assertNotNull("Charger radio quick-off notification must be posted", radioNotif)
+        assertEquals(
+            "Charger Connected — Turn Off Wi-Fi & Mobile Data",
+            radioNotif.extras.getString(android.app.Notification.EXTRA_TITLE)
+        )
+        assertEquals(
+            "Charger radio notification must NOT be ongoing",
+            0,
+            radioNotif.flags and android.app.Notification.FLAG_ONGOING_EVENT
+        )
+        assertTrue(
+            "Charger radio notification must be auto-cancel",
+            (radioNotif.flags and android.app.Notification.FLAG_AUTO_CANCEL) != 0
+        )
+        assertTrue(
+            "Notification must include 'Open Internet Panel' action",
+            radioNotif.actions?.any { it.title?.toString() == "Open Internet Panel" } == true
+        )
+
+        // Cancel on disconnect
+        com.example.hardware.ChargerRadioController.cancelChargerRadioNotification(context)
+        assertNull(
+            shadowNotificationManager.getNotification(
+                com.example.hardware.ChargerRadioController.NOTIFICATION_ID_CHARGER_RADIOS
+            )
+        )
+
+        // 4. Feature 2: Switch to NO_PERSISTENT_HOURLY -> stops persistent FGS, cancels ID 4010, schedules 1-hour job
+        kotlinx.coroutines.runBlocking {
+            dataStore.updateBackgroundSettings(
+                backgroundMonitoring = true,
+                persistentNotification = false,
+                silentNotification = false,
+                monitoringMode = com.example.model.BackgroundMonitoringMode.NO_PERSISTENT_HOURLY
+            )
+            dataStore.updateHourlyStatusNotificationEnabled(true)
+            val saved = dataStore.getSettingsSnapshot()
+            assertEquals(com.example.model.BackgroundMonitoringMode.NO_PERSISTENT_HOURLY, saved.backgroundMonitoringMode)
+            assertTrue(saved.hourlyStatusNotificationEnabled)
+        }
+
+        com.example.service.SilentBackgroundMonitorEngine.applyMonitoringMode(
+            context = context,
+            enabled = true,
+            mode = com.example.model.BackgroundMonitoringMode.NO_PERSISTENT_HOURLY
+        )
+        assertFalse(
+            "Persistent foreground notification flag must be false in NO_PERSISTENT_HOURLY mode",
+            com.example.service.BatteryTelemetryHub.isForegroundNotificationVisible.value
+        )
+        assertNull(
+            "Persistent notification ID 4010 must be cancelled in NO_PERSISTENT_HOURLY mode",
+            shadowNotificationManager.getNotification(com.example.service.BatteryMonitorService.NOTIFICATION_ID)
+        )
+        val scheduledHourlyJob = jobScheduler.allPendingJobs.firstOrNull {
+            it.id == com.example.service.SilentBackgroundMonitorEngine.JOB_ID_SILENT_PERIODIC
+        }
+        assertNotNull("Hourly periodic JobScheduler job must be scheduled", scheduledHourlyJob)
+        assertEquals(
+            com.example.service.SilentBackgroundMonitorEngine.JOB_PERIODIC_HOURLY_INTERVAL_MS,
+            scheduledHourlyJob!!.intervalMillis
+        )
+
+        // 5. Hourly status notification must be auto-cancel & swipe-dismissible (not ongoing)
+        val postedHourly = com.example.service.SilentBackgroundMonitorEngine.postHourlyStatusNotification(
+            context = context,
+            snapshot = com.example.model.BatteryHardwareSnapshot(
+                percentage = 74,
+                isPercentageValid = true,
+                isCharging = false,
+                statusLabel = "Discharging",
+                healthLabel = "Good",
+                temperatureCelsius = 33.4f
+            )
+        )
+        assertTrue(postedHourly)
+        val hourlyNotif = shadowNotificationManager.getNotification(
+            com.example.service.SilentBackgroundMonitorEngine.NOTIFICATION_ID_HOURLY_STATUS
+        )
+        assertNotNull("Hourly status notification must be posted", hourlyNotif)
+        assertEquals(
+            "Hourly status notification must be swipe-dismissible (not ongoing)",
+            0,
+            hourlyNotif.flags and android.app.Notification.FLAG_ONGOING_EVENT
+        )
+        assertTrue(
+            "Hourly status notification must be auto-cancel",
+            (hourlyNotif.flags and android.app.Notification.FLAG_AUTO_CANCEL) != 0
+        )
+
+        // Cleanup
+        com.example.service.SilentBackgroundMonitorEngine.stopSilentMonitoring(context)
+    }
 }
+

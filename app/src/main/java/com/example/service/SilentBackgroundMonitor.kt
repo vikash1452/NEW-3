@@ -1,6 +1,8 @@
 package com.example.service
 
+import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.job.JobInfo
 import android.app.job.JobParameters
 import android.app.job.JobScheduler
@@ -12,17 +14,21 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
 import android.os.PowerManager
+import androidx.core.app.NotificationCompat
+import com.example.MainActivity
 import com.example.data.local.BatteryBossDatabase
 import com.example.data.local.BatteryBossRepository
 import com.example.data.local.BatteryUsageHistoryEntity
 import com.example.data.preferences.SettingsDataStore
 import com.example.hardware.BatteryHardwareReader
+import com.example.hardware.ChargerRadioController
 import com.example.model.BackgroundMonitoringMode
 import com.example.model.BatteryHardwareSnapshot
 import com.example.model.BatterySaverMode
 import com.example.model.RestrictionExecutionStatus
 import com.example.model.UserSettings
 import com.example.update.UpdateLockManager
+import java.util.Locale
 import kotlin.math.abs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -66,8 +72,12 @@ object SilentBackgroundMonitorEngine {
 
     const val JOB_ID_SILENT_PERIODIC = 4021
     const val JOB_ID_SILENT_CHARGING_EVENT = 4022
+    const val CHANNEL_ID_HOURLY_STATUS = "battery_boss_hourly_status_channel"
+    const val NOTIFICATION_ID_HOURLY_STATUS = 4032
     const val MIN_JOB_PERIODIC_INTERVAL_MS = 15 * 60 * 1000L // 15 minutes (Android OS minimum)
+    const val JOB_PERIODIC_HOURLY_INTERVAL_MS = 60 * 60 * 1000L // 60 minutes (1-Hour periodic check)
     const val MIN_JOB_FLEX_INTERVAL_MS = 5 * 60 * 1000L // 5 minutes flex window
+    const val HOURLY_JOB_FLEX_INTERVAL_MS = 10 * 60 * 1000L // 10 minutes flex window
 
     private val engineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var screenOnTickerJob: Job? = null
@@ -144,9 +154,20 @@ object SilentBackgroundMonitorEngine {
         if (!enabled) {
             stopSilentMonitoring(appContext)
             BatteryMonitorService.stopService(appContext)
+            cancelHourlyStatusNotification(appContext)
             return
         }
 
+        // Feature 2: True "No Persistent Notification (Hourly Check)" mode:
+        // Completely stop BatteryMonitorService & cancel NOTIFICATION_ID (4010) so status bar is 100% clean.
+        // Instant charger events work via BootAndPowerReceiver + dynamic receiver; 1-hour checks run via JobScheduler.
+        if (mode == BackgroundMonitoringMode.NO_PERSISTENT_HOURLY) {
+            BatteryMonitorService.stopForegroundServiceOnly(appContext)
+            startNoPersistentHourlyMonitoring(appContext)
+            return
+        }
+
+        cancelHourlyStatusNotification(appContext)
         val isSilent = (mode == BackgroundMonitoringMode.SILENT_BACKGROUND)
         if (BatteryMonitorService.isLiveServiceInstanceActive() && triggerEvent == null) {
             BatteryTelemetryHub.setSilentBackgroundActive(isSilent)
@@ -154,10 +175,38 @@ object SilentBackgroundMonitorEngine {
             return
         }
 
-        // Always start/maintain BatteryMonitorService as an active Foreground Service when monitoring is ON
+        // Foreground Service modes (SILENT_BACKGROUND / CONTINUOUS_FOREGROUND)
         startSilentMonitoring(appContext, triggerEvent = triggerEvent, mode = mode)
         BatteryMonitorService.startService(appContext, triggerEvent = triggerEvent)
         BatteryMonitorService.refreshNotificationInPlace(appContext, silentOverride = isSilent)
+    }
+
+    /**
+     * Activates true No-Persistent-Notification mode (0 ongoing notifications):
+     * - Ensures BatteryMonitorService is stopped and NOTIFICATION_ID = 4010 is cancelled.
+     * - Registers dynamic BroadcastReceiver while process is alive + relies on BootAndPowerReceiver
+     *   for instant charger connect/disconnect & low-battery events.
+     * - Schedules 1-hour periodic JobScheduler check (`JOB_ID_SILENT_PERIODIC` @ 60 minutes).
+     */
+    fun startNoPersistentHourlyMonitoring(context: Context) {
+        val appContext = context.applicationContext
+        registeredAppContext = appContext
+
+        val pm = appContext.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        val interactive = runCatching { pm?.isInteractive ?: true }.getOrDefault(true)
+        BatteryTelemetryHub.setScreenInteractive(interactive)
+        BatteryTelemetryHub.setActiveMonitoringMode(BackgroundMonitoringMode.NO_PERSISTENT_HOURLY)
+        BatteryTelemetryHub.setSilentBackgroundActive(true)
+        BatteryTelemetryHub.setServiceRunning(true)
+        BatteryTelemetryHub.setForegroundNotificationVisible(false)
+
+        ensureSettingsCollector(appContext)
+        registerSilentReceiver(appContext)
+        scheduleSilentJobs(appContext, modeOverride = BackgroundMonitoringMode.NO_PERSISTENT_HOURLY)
+
+        val initialSnap = BatteryHardwareReader(appContext).readSnapshot()
+        BatteryTelemetryHub.updateSnapshot(initialSnap)
+        updateSilentScreenOnSupplementTicker(appContext)
     }
 
     /**
@@ -172,6 +221,11 @@ object SilentBackgroundMonitorEngine {
         val appContext = context.applicationContext
         registeredAppContext = appContext
 
+        if (mode == BackgroundMonitoringMode.NO_PERSISTENT_HOURLY) {
+            startNoPersistentHourlyMonitoring(appContext)
+            return
+        }
+
         val pm = appContext.getSystemService(Context.POWER_SERVICE) as? PowerManager
         val interactive = runCatching { pm?.isInteractive ?: true }.getOrDefault(true)
         BatteryTelemetryHub.setScreenInteractive(interactive)
@@ -181,7 +235,7 @@ object SilentBackgroundMonitorEngine {
 
         ensureSettingsCollector(appContext)
         registerSilentReceiver(appContext)
-        scheduleSilentJobs(appContext)
+        scheduleSilentJobs(appContext, modeOverride = mode)
 
         // Ensure Foreground Service is alive and its notification matches current silent/low-priority mode
         BatteryMonitorService.startService(appContext, triggerEvent = triggerEvent)
@@ -269,6 +323,13 @@ object SilentBackgroundMonitorEngine {
             )
 
             if (triggerAction == Intent.ACTION_POWER_CONNECTED) {
+                if (settings.autoDisableRadiosOnChargeEnabled) {
+                    ChargerRadioController.onChargerConnected(
+                        context = appContext,
+                        settings = settings,
+                        isAppInForeground = BatteryTelemetryHub.isAppInForeground.value
+                    )
+                }
                 engineScope.launch(Dispatchers.IO) {
                     val refreshedLocked = UpdateLockManager.refreshIfStaleAndCheckLocked(appContext)
                     if (refreshedLocked) {
@@ -276,6 +337,7 @@ object SilentBackgroundMonitorEngine {
                     }
                 }
             } else if (triggerAction == Intent.ACTION_POWER_DISCONNECTED) {
+                ChargerRadioController.cancelChargerRadioNotification(appContext)
                 voiceAssistant.prewarmChargerAnnouncement(alignedSnap)
             }
 
@@ -289,9 +351,80 @@ object SilentBackgroundMonitorEngine {
     }
 
     /**
-     * Schedules OS-managed background checks via `JobScheduler` without requiring any notification.
+     * Posts a single swipe-dismissible, auto-cancel (`setOngoing(false)`) hourly battery status
+     * notification when `NO_PERSISTENT_HOURLY` mode performs its 1-hour JobScheduler check.
      */
-    fun scheduleSilentJobs(context: Context): Boolean {
+    fun postHourlyStatusNotification(
+        context: Context,
+        snapshot: BatteryHardwareSnapshot
+    ): Boolean {
+        val appContext = context.applicationContext
+        val nm = appContext.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            ?: return false
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID_HOURLY_STATUS,
+                "Hourly Battery Check (Swipeable)",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Single auto-cancel, swipe-dismissible battery health summary posted once per hour in No Persistent Notification mode."
+                setSound(null, null)
+                enableVibration(false)
+                setShowBadge(false)
+            }
+            nm.createNotificationChannel(channel)
+        }
+
+        val openAppIntent = Intent(appContext, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val contentIntent = PendingIntent.getActivity(
+            appContext,
+            4033,
+            openAppIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val tempText = snapshot.temperatureCelsius?.let { String.format(Locale.US, "%.1f°C", it) } ?: "N/A"
+        val healthText = snapshot.healthLabel.ifBlank { "Good" }
+        val title = "Battery Boss Hourly Check • ${snapshot.percentage}%"
+        val body = "${snapshot.statusLabel} • Temp $tempText • Health: $healthText (Swipe to dismiss)"
+
+        val notification = NotificationCompat.Builder(appContext, CHANNEL_ID_HOURLY_STATUS)
+            .setSmallIcon(android.R.drawable.ic_lock_idle_charging)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setOngoing(false)
+            .setAutoCancel(true)
+            .setSilent(true)
+            .setOnlyAlertOnce(true)
+            .setContentIntent(contentIntent)
+            .build()
+
+        return runCatching {
+            nm.notify(NOTIFICATION_ID_HOURLY_STATUS, notification)
+            true
+        }.getOrDefault(false)
+    }
+
+    fun cancelHourlyStatusNotification(context: Context) {
+        runCatching {
+            val nm = context.applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            nm?.cancel(NOTIFICATION_ID_HOURLY_STATUS)
+        }
+    }
+
+    /**
+     * Schedules OS-managed background checks via `JobScheduler` without requiring any notification.
+     * In `NO_PERSISTENT_HOURLY` mode, uses an exact 60-minute (1-hour) periodic interval.
+     */
+    fun scheduleSilentJobs(
+        context: Context,
+        modeOverride: BackgroundMonitoringMode? = null
+    ): Boolean {
         val appContext = context.applicationContext
         val jobScheduler = appContext.getSystemService(Context.JOB_SCHEDULER_SERVICE) as? JobScheduler
             ?: run {
@@ -299,17 +432,24 @@ object SilentBackgroundMonitorEngine {
                 return false
             }
 
+        val effectiveMode = modeOverride ?: BatteryTelemetryHub.activeMonitoringMode.value
         val serviceComponent = ComponentName(appContext, SilentBatteryJobService::class.java)
-        val periodicIntervalMs = when (latestSettings.batterySaverMode) {
-            BatterySaverMode.EXTREME_SAVER -> 30 * 60 * 1000L
-            BatterySaverMode.SMART_SAVER -> 20 * 60 * 1000L
-            BatterySaverMode.NORMAL -> MIN_JOB_PERIODIC_INTERVAL_MS
-        }.coerceAtLeast(MIN_JOB_PERIODIC_INTERVAL_MS)
+        val isHourlyMode = effectiveMode == BackgroundMonitoringMode.NO_PERSISTENT_HOURLY
+        val periodicIntervalMs = if (isHourlyMode) {
+            JOB_PERIODIC_HOURLY_INTERVAL_MS
+        } else {
+            when (latestSettings.batterySaverMode) {
+                BatterySaverMode.EXTREME_SAVER -> 30 * 60 * 1000L
+                BatterySaverMode.SMART_SAVER -> 20 * 60 * 1000L
+                BatterySaverMode.NORMAL -> MIN_JOB_PERIODIC_INTERVAL_MS
+            }.coerceAtLeast(MIN_JOB_PERIODIC_INTERVAL_MS)
+        }
+        val flexMs = if (isHourlyMode) HOURLY_JOB_FLEX_INTERVAL_MS else MIN_JOB_FLEX_INTERVAL_MS
 
         val periodicBuilder = JobInfo.Builder(JOB_ID_SILENT_PERIODIC, serviceComponent)
             .setPersisted(true)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            periodicBuilder.setPeriodic(periodicIntervalMs, MIN_JOB_FLEX_INTERVAL_MS)
+            periodicBuilder.setPeriodic(periodicIntervalMs, flexMs)
         } else {
             periodicBuilder.setPeriodic(periodicIntervalMs)
         }
@@ -557,15 +697,35 @@ class SilentBatteryJobService : JobService() {
         activeJob = jobScope.launch {
             try {
                 val settings = SettingsDataStore(appContext).getSettingsSnapshot()
-                if (settings.backgroundMonitoringEnabled &&
-                    settings.backgroundMonitoringMode == BackgroundMonitoringMode.SILENT_BACKGROUND
-                ) {
-                    SilentBackgroundMonitorEngine.startSilentMonitoring(appContext)
-                    SilentBackgroundMonitorEngine.evaluateSilentBackgroundEventNow(
-                        context = appContext,
-                        triggerAction = null,
-                        batteryIntent = null
-                    )
+                if (settings.backgroundMonitoringEnabled) {
+                    when (settings.backgroundMonitoringMode) {
+                        BackgroundMonitoringMode.NO_PERSISTENT_HOURLY -> {
+                            BatteryTelemetryHub.setServiceRunning(true)
+                            BatteryTelemetryHub.setForegroundNotificationVisible(false)
+                            val snap = SilentBackgroundMonitorEngine.evaluateSilentBackgroundEventNow(
+                                context = appContext,
+                                triggerAction = null,
+                                batteryIntent = null,
+                                settingsOverride = settings
+                            )
+                            if (settings.hourlyStatusNotificationEnabled) {
+                                SilentBackgroundMonitorEngine.postHourlyStatusNotification(
+                                    context = appContext,
+                                    snapshot = snap
+                                )
+                            }
+                        }
+                        BackgroundMonitoringMode.SILENT_BACKGROUND -> {
+                            SilentBackgroundMonitorEngine.startSilentMonitoring(appContext)
+                            SilentBackgroundMonitorEngine.evaluateSilentBackgroundEventNow(
+                                context = appContext,
+                                triggerAction = null,
+                                batteryIntent = null,
+                                settingsOverride = settings
+                            )
+                        }
+                        BackgroundMonitoringMode.CONTINUOUS_FOREGROUND -> Unit
+                    }
                 }
             } finally {
                 if (params != null) {
