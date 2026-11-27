@@ -297,4 +297,104 @@ class UpdateRepositoryTest {
             UpdateLockManager.clearLock(context)
         }
     }
+
+    @Test
+    fun `admin custom ui announcement parses media gif video animations buttons and blocks without locking app`() {
+        val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+
+        val raw = """
+            {
+              "is_enabled": true,
+              "dialog_mode": "announcement",
+              "dialog_id": "festive_promo_01",
+              "show_once": true,
+              "mandatory": false,
+              "version": "2.2",
+              "title": "Special Feature Live!",
+              "description": ["New voice studio pack", "Watch quick video guide"],
+              "ui_config": {
+                "layout_style": "hero_media",
+                "entrance_animation": "slide_up",
+                "animation_type": "confetti",
+                "show_confetti": true,
+                "backdrop_color": "#101626",
+                "card_color": "#1B2338",
+                "card_corner_radius": 28,
+                "accent_color": "#00E5FF",
+                "badge_text": "NEW",
+                "media_type": "auto",
+                "video_url": "https://cdn.example.com/demo_guide.mp4?token=123",
+                "thumbnail_url": "https://cdn.example.com/thumb.jpg",
+                "video_autoplay": true,
+                "video_loop": false,
+                "video_muted": true,
+                "primary_button_text": "Watch Full Video",
+                "primary_button_url": "https://youtube.com/watch?v=123",
+                "primary_button_icon": "play",
+                "buttons": [
+                  {
+                    "id": "tg",
+                    "text": "Join Telegram",
+                    "url": "https://t.me/batteryboss",
+                    "action": "open_url",
+                    "style": "outlined",
+                    "icon": "telegram",
+                    "row_group": "social"
+                  },
+                  {
+                    "id": "voice",
+                    "text": "Voice Studio",
+                    "url": "voice_alerts",
+                    "action": "open_tab",
+                    "style": "tonal",
+                    "icon": "sparkles",
+                    "row_group": "social"
+                  }
+                ],
+                "ui_blocks": [
+                  { "type": "badge", "text": "ADMIN NOTICE" },
+                  { "type": "media", "media_url": "https://cdn.example.com/banner.gif" },
+                  { "type": "highlight_box", "title": "Tip", "text": "Plug in charger to test" }
+                ]
+              }
+            }
+        """.trimIndent()
+
+        val parsed = UpdateRepository.parseUpdateJson(raw)
+        assertNotNull(parsed)
+        assertEquals(com.example.update.AdminDialogMode.ANNOUNCEMENT, parsed!!.dialogMode)
+        assertEquals("festive_promo_01", parsed.dialogId)
+        assertTrue(parsed.showOnce)
+        assertFalse(parsed.isUpdateLockRequired)
+
+        val ui = parsed.uiConfig
+        assertEquals(com.example.update.AdminDialogLayoutStyle.HERO_MEDIA, ui.resolveEffectiveLayoutStyle())
+        assertEquals(com.example.update.AdminEntranceAnimation.SLIDE_UP, ui.entranceAnimation)
+        assertEquals(com.example.update.AdminAnimationType.CONFETTI, ui.animationType)
+        assertTrue(ui.showConfetti)
+        assertEquals(com.example.update.AdminMediaType.VIDEO, ui.resolveEffectiveMediaType())
+        assertEquals("https://cdn.example.com/demo_guide.mp4?token=123", ui.mediaUrl)
+        assertEquals(false, ui.videoLoop)
+        assertEquals(true, ui.videoMuted)
+        assertEquals(2, ui.buttons.size)
+        assertEquals(com.example.update.AdminButtonAction.OPEN_TAB, ui.buttons[1].action)
+        assertEquals(3, ui.blocks.size)
+        assertEquals(
+            com.example.update.AdminMediaType.GIF,
+            com.example.update.AdminDialogUiConfig.inferMediaTypeFromUrl(ui.blocks[1].mediaUrl)
+        )
+
+        // Evaluates as UpdateAvailable even when version == currentVersion ("2.2") and apk_url is empty
+        val evalResult = UpdateRepository.evaluateUpdate(parsed, currentVersion = "2.2")
+        assertTrue(evalResult is UpdateFetchResult.UpdateAvailable)
+
+        // Syncing announcement mode must NOT lock the app or voice engine
+        UpdateLockManager.syncFromFetchResult(context, evalResult)
+        assertFalse(UpdateLockManager.isUpdateLockActive(context))
+
+        // show_once dismissal tracking
+        assertFalse(UpdateLockManager.isDialogDismissed(context, parsed))
+        UpdateLockManager.markDialogDismissed(context, parsed)
+        assertTrue(UpdateLockManager.isDialogDismissed(context, parsed))
+    }
 }

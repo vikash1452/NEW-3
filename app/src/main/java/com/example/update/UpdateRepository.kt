@@ -27,7 +27,12 @@ data class AppUpdateInfo(
     val mandatory: Boolean,
     val downloadClicks: Long = 0L,
     val releaseDateMillis: Long = 0L,
-    val releaseDate: String = ""
+    val releaseDate: String = "",
+    val dialogMode: AdminDialogMode = AdminDialogMode.UPDATE,
+    val dialogId: String = "",
+    val showOnce: Boolean = false,
+    val uiConfig: AdminDialogUiConfig = AdminDialogUiConfig(),
+    val rawJson: String = ""
 ) {
     val bulletPoints: List<String>
         get() = description
@@ -42,6 +47,9 @@ data class AppUpdateInfo(
             if (cleaned.isEmpty()) return ""
             return if (cleaned.startsWith("v", ignoreCase = true)) cleaned else "v$cleaned"
         }
+
+    val isUpdateLockRequired: Boolean
+        get() = dialogMode == AdminDialogMode.UPDATE
 }
 
 sealed interface UpdateFetchResult {
@@ -54,7 +62,7 @@ sealed interface UpdateFetchResult {
  * Internal, UI-invisible gate that tracks whether an active remote update is live on Firebase.
  *
  * Behavior:
- * - When `isUpdateLockActive(context) == false` (normal state or scheduled future release date):
+ * - When `isUpdateLockActive(context) == false` (normal state, announcement-only dialog, or scheduled future release date):
  *   zero effect on app or voice.
  * - When `isUpdateLockActive(context) == true` (newer update live and release date reached):
  *   1. All normal app UI and background battery functions are locked/paused.
@@ -63,6 +71,7 @@ sealed interface UpdateFetchResult {
  */
 object UpdateLockManager {
     private const val PREFS_NAME = "battery_boss_update_gate"
+    private const val DISMISSED_PREFS_NAME = "battery_boss_admin_dialog_dismissed"
     private const val KEY_LOCK_ACTIVE = "lock_active"
     private const val KEY_VERSION = "cached_version"
     private const val KEY_TITLE = "cached_title"
@@ -71,6 +80,7 @@ object UpdateLockManager {
     private const val KEY_MANDATORY = "cached_mandatory"
     private const val KEY_RELEASE_DATE_MILLIS = "cached_release_date_millis"
     private const val KEY_RELEASE_DATE = "cached_release_date"
+    private const val KEY_RAW_JSON = "cached_raw_json"
     private const val KEY_LAST_CHECKED_MS = "last_checked_ms"
 
     private const val BACKGROUND_CACHE_TTL_MS = 30_000L
@@ -114,6 +124,13 @@ object UpdateLockManager {
     ): AppUpdateInfo? {
         if (!isUpdateLockActive(context, nowMillis)) return null
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val rawJson = prefs.getString(KEY_RAW_JSON, "").orEmpty()
+        if (rawJson.isNotBlank()) {
+            val parsed = UpdateRepository.parseUpdateJson(rawJson)
+            if (parsed != null && parsed.dialogMode == AdminDialogMode.UPDATE) {
+                return parsed.copy(mandatory = true)
+            }
+        }
         val version = prefs.getString(KEY_VERSION, "").orEmpty()
         val apkUrl = prefs.getString(KEY_APK_URL, "").orEmpty()
         if (version.isEmpty() || !UpdateRepository.isValidDownloadUrl(apkUrl)) return null
@@ -125,7 +142,8 @@ object UpdateLockManager {
             apkUrl = apkUrl,
             mandatory = true,
             releaseDateMillis = prefs.getLong(KEY_RELEASE_DATE_MILLIS, 0L),
-            releaseDate = prefs.getString(KEY_RELEASE_DATE, "").orEmpty()
+            releaseDate = prefs.getString(KEY_RELEASE_DATE, "").orEmpty(),
+            dialogMode = AdminDialogMode.UPDATE
         )
     }
 
@@ -134,17 +152,26 @@ object UpdateLockManager {
         val now = System.currentTimeMillis()
         when (result) {
             is UpdateFetchResult.UpdateAvailable -> {
-                prefs.edit()
-                    .putBoolean(KEY_LOCK_ACTIVE, true)
-                    .putString(KEY_VERSION, result.info.version)
-                    .putString(KEY_TITLE, result.info.title)
-                    .putString(KEY_DESCRIPTION, result.info.description)
-                    .putString(KEY_APK_URL, result.info.apkUrl)
-                    .putBoolean(KEY_MANDATORY, true)
-                    .putLong(KEY_RELEASE_DATE_MILLIS, result.info.releaseDateMillis)
-                    .putString(KEY_RELEASE_DATE, result.info.releaseDate)
-                    .putLong(KEY_LAST_CHECKED_MS, now)
-                    .apply()
+                if (result.info.isUpdateLockRequired) {
+                    prefs.edit()
+                        .putBoolean(KEY_LOCK_ACTIVE, true)
+                        .putString(KEY_VERSION, result.info.version)
+                        .putString(KEY_TITLE, result.info.title)
+                        .putString(KEY_DESCRIPTION, result.info.description)
+                        .putString(KEY_APK_URL, result.info.apkUrl)
+                        .putBoolean(KEY_MANDATORY, true)
+                        .putLong(KEY_RELEASE_DATE_MILLIS, result.info.releaseDateMillis)
+                        .putString(KEY_RELEASE_DATE, result.info.releaseDate)
+                        .putString(KEY_RAW_JSON, result.info.rawJson)
+                        .putLong(KEY_LAST_CHECKED_MS, now)
+                        .apply()
+                } else {
+                    // Announcement / custom UI dialog does not lock normal app functions or battery voice
+                    prefs.edit()
+                        .putBoolean(KEY_LOCK_ACTIVE, false)
+                        .putLong(KEY_LAST_CHECKED_MS, now)
+                        .apply()
+                }
             }
             is UpdateFetchResult.UpToDate -> {
                 prefs.edit()
@@ -156,6 +183,7 @@ object UpdateLockManager {
                     .remove(KEY_MANDATORY)
                     .remove(KEY_RELEASE_DATE_MILLIS)
                     .remove(KEY_RELEASE_DATE)
+                    .remove(KEY_RAW_JSON)
                     .putLong(KEY_LAST_CHECKED_MS, now)
                     .apply()
             }
@@ -163,6 +191,27 @@ object UpdateLockManager {
                 // Keep existing persisted lock state unchanged on transient offline/network errors
             }
         }
+    }
+
+    fun isDialogDismissed(context: Context, info: AppUpdateInfo): Boolean {
+        if (!info.showOnce || info.mandatory || info.isUpdateLockRequired) return false
+        val id = info.dialogId.trim().ifEmpty {
+            "${info.title}_${info.uiConfig.mediaUrl}_${info.version}".hashCode().toString()
+        }
+        val prefs = context.applicationContext.getSharedPreferences(DISMISSED_PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean("dismissed_$id", false)
+    }
+
+    fun markDialogDismissed(context: Context, info: AppUpdateInfo) {
+        if (!info.showOnce) return
+        val id = info.dialogId.trim().ifEmpty {
+            "${info.title}_${info.uiConfig.mediaUrl}_${info.version}".hashCode().toString()
+        }
+        context.applicationContext
+            .getSharedPreferences(DISMISSED_PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean("dismissed_$id", true)
+            .apply()
     }
 
     fun setUpdateLockForTest(
@@ -181,6 +230,7 @@ object UpdateLockManager {
                 .putString(KEY_APK_URL, "https://example.com/update.apk")
                 .putBoolean(KEY_MANDATORY, true)
                 .putLong(KEY_RELEASE_DATE_MILLIS, releaseDateMillis)
+                .remove(KEY_RAW_JSON)
                 .putLong(KEY_LAST_CHECKED_MS, System.currentTimeMillis())
                 .apply()
         } else {
@@ -228,18 +278,18 @@ object UpdateLockManager {
 }
 
 /**
- * Fetches app update metadata directly from the Firebase Realtime Database REST endpoint:
+ * Fetches app update & admin-controlled dynamic dialog UI metadata directly from Firebase RTDB:
  * https://admin-50dca-default-rtdb.firebaseio.com/battery_boss_update
  *
- * - Supports both camelCase (`enabled`, `apkUrl`, `mandatory`, `releaseDateMillis`) and
- *   snake_case (`is_enabled`, `apk_url`, `is_mandatory`, `release_date_millis`, `release_date`).
- * - Triggers an update ONLY when:
- *   1. `enabled == true`,
- *   2. remote `version` is strictly newer than the installed app version, AND
- *   3. `releaseDateMillis == 0L` OR `nowMillis >= releaseDateMillis`.
- * - Prioritizes `releaseDateMillis` over date strings, with safe fallback parsing for `release_date`
- *   when `releaseDateMillis` is missing or `0L`.
- * - Atomically increments `download_clicks` when the user taps Update.
+ * Supports:
+ * - Full backward compatibility with existing update fields (`enabled`, `version`, `apk_url`, `release_date`, etc.)
+ * - Admin-driven dynamic dialog UI (`ui_config` / `dialog_ui` / root fields): photos, animated GIFs,
+ *   streaming videos, built-in animations, custom theme colors, layout styles, dynamic extra buttons,
+ *   and ordered `ui_blocks`.
+ * - Two dialog modes:
+ *   1. `UPDATE` (default): triggers when `version` > installed version & release date reached; locks app & voice.
+ *   2. `ANNOUNCEMENT` (`dialog_mode = "announcement"` / `"promo"` / `"custom"` or `show_custom_dialog = true`):
+ *      triggers on any version when `enabled == true` & release date reached, with full admin UI & optional dismiss.
  */
 class UpdateRepository(
     private val databaseBaseUrl: String = FIREBASE_DATABASE_URL,
@@ -269,43 +319,55 @@ class UpdateRepository(
             if (trimmed.equals("null", ignoreCase = true)) return null
 
             return runCatching {
-                val json = JSONObject(trimmed)
+                val root = JSONObject(trimmed)
+                val uiObj = root.optJSONObject("ui_config")
+                    ?: root.optJSONObject("dialog_ui")
+                    ?: root.optJSONObject("ui")
 
-                val enabled = readBooleanAny(json, "enabled", "is_enabled", defaultValue = false)
-                val mandatory = readBooleanAny(json, "mandatory", "is_mandatory", defaultValue = false)
-                val apkUrl = readStringAny(json, "apkUrl", "apk_url", "download_url", "url")
-                val version = readStringAny(json, "version", "latest_version", "app_version")
-                val title = readStringAny(json, "title", "update_title").ifEmpty { "ABOUT UPDATE" }
-                val downloadClicks = readLongAny(json, "download_clicks", "downloadClicks", defaultValue = 0L)
-                val releaseDateStr = readStringAny(json, "releaseDate", "release_date")
+                val enabled = readBooleanAny(root, uiObj, "enabled", "is_enabled", defaultValue = false)
+                val mandatory = readBooleanAny(root, uiObj, "mandatory", "is_mandatory", defaultValue = false)
+                val apkUrl = readStringAny(root, uiObj, "apkUrl", "apk_url", "download_url", "url", "primary_url")
+                val version = readStringAny(root, uiObj, "version", "latest_version", "app_version")
+                val title = readStringAny(root, uiObj, "title", "update_title").ifEmpty { "ABOUT UPDATE" }
+                val downloadClicks = readLongAny(root, uiObj, "download_clicks", "downloadClicks", defaultValue = 0L)
+                val releaseDateStr = readStringAny(root, uiObj, "releaseDate", "release_date")
 
-                // Priority 1: explicit releaseDateMillis (camelCase or snake_case)
                 val explicitReleaseMillis = readLongAny(
-                    json,
+                    root,
+                    uiObj,
                     "releaseDateMillis",
                     "release_date_millis",
                     defaultValue = 0L
                 ).coerceAtLeast(0L)
 
-                // Priority 2: safe fallback parsing of date string only when releaseDateMillis is missing/0L
                 val resolvedReleaseDateMillis = if (explicitReleaseMillis > 0L) {
                     explicitReleaseMillis
                 } else {
                     parseReleaseDateStringToMillis(releaseDateStr)
                 }
 
-                val description = when (val rawDesc = json.opt("description") ?: json.opt("message")) {
-                    is JSONArray -> {
-                        buildList {
-                            for (i in 0 until rawDesc.length()) {
-                                val item = rawDesc.optString(i, "").trim()
-                                if (item.isNotEmpty()) add(item)
-                            }
-                        }.joinToString("\n")
-                    }
-                    is String -> rawDesc.trim()
-                    else -> ""
+                val description = parseDescription(root, uiObj)
+
+                val rawDialogMode = readStringAny(root, uiObj, "dialog_mode", "dialogMode", "mode")
+                val showCustomFlag = readBooleanAny(
+                    root,
+                    uiObj,
+                    "show_custom_dialog",
+                    "showCustomDialog",
+                    "announcement_only",
+                    "announcementOnly",
+                    defaultValue = false
+                )
+                val dialogMode = when {
+                    rawDialogMode.isNotEmpty() -> AdminDialogMode.fromRaw(rawDialogMode)
+                    showCustomFlag -> AdminDialogMode.ANNOUNCEMENT
+                    else -> AdminDialogMode.UPDATE
                 }
+
+                val dialogId = readStringAny(root, uiObj, "dialog_id", "dialogId", "campaign_id")
+                val showOnce = readBooleanAny(root, uiObj, "show_once", "showOnce", defaultValue = false)
+
+                val uiConfig = parseUiConfig(root, uiObj, apkUrl, dialogMode, mandatory)
 
                 AppUpdateInfo(
                     enabled = enabled,
@@ -316,11 +378,261 @@ class UpdateRepository(
                     mandatory = mandatory,
                     downloadClicks = downloadClicks,
                     releaseDateMillis = resolvedReleaseDateMillis,
-                    releaseDate = releaseDateStr
+                    releaseDate = releaseDateStr,
+                    dialogMode = dialogMode,
+                    dialogId = dialogId,
+                    showOnce = showOnce,
+                    uiConfig = uiConfig,
+                    rawJson = trimmed
                 )
             }.onFailure { error ->
                 runCatching { Log.w(TAG, "Failed to parse update JSON: ${error.message}") }
             }.getOrNull()
+        }
+
+        private fun parseDescription(root: JSONObject, uiObj: JSONObject?): String {
+            val rawDesc = uiObj?.opt("description")
+                ?: uiObj?.opt("message")
+                ?: root.opt("description")
+                ?: root.opt("message")
+            return when (rawDesc) {
+                is JSONArray -> {
+                    buildList {
+                        for (i in 0 until rawDesc.length()) {
+                            val item = rawDesc.optString(i, "").trim()
+                            if (item.isNotEmpty()) add(item)
+                        }
+                    }.joinToString("\n")
+                }
+                is String -> rawDesc.trim()
+                else -> ""
+            }
+        }
+
+        private fun parseUiConfig(
+            root: JSONObject,
+            uiObj: JSONObject?,
+            apkUrl: String,
+            dialogMode: AdminDialogMode,
+            mandatory: Boolean
+        ): AdminDialogUiConfig {
+            val mediaObj = uiObj?.optJSONObject("media") ?: root.optJSONObject("media")
+
+            val videoUrl = readStringAny(root, uiObj, mediaObj, "video_url", "videoUrl")
+            val gifUrl = readStringAny(root, uiObj, mediaObj, "gif_url", "gifUrl")
+            val imageUrl = readStringAny(root, uiObj, mediaObj, "image_url", "imageUrl", "photo_url", "photoUrl", "banner_url", "bannerUrl")
+            val genericMediaUrl = readStringAny(root, uiObj, mediaObj, "media_url", "mediaUrl")
+
+            val rawMediaType = readStringAny(root, uiObj, mediaObj, "media_type", "mediaType")
+            val resolvedMediaUrl = when {
+                genericMediaUrl.isNotEmpty() -> genericMediaUrl
+                rawMediaType.equals("video", ignoreCase = true) && videoUrl.isNotEmpty() -> videoUrl
+                rawMediaType.equals("gif", ignoreCase = true) && gifUrl.isNotEmpty() -> gifUrl
+                videoUrl.isNotEmpty() -> videoUrl
+                gifUrl.isNotEmpty() -> gifUrl
+                imageUrl.isNotEmpty() -> imageUrl
+                else -> ""
+            }
+
+            val parsedMediaType = if (rawMediaType.isNotEmpty()) {
+                AdminMediaType.fromRaw(rawMediaType)
+            } else {
+                when {
+                    videoUrl.isNotEmpty() && genericMediaUrl.isEmpty() -> AdminMediaType.VIDEO
+                    gifUrl.isNotEmpty() && genericMediaUrl.isEmpty() -> AdminMediaType.GIF
+                    else -> AdminMediaType.AUTO
+                }
+            }
+
+            val rawLayoutStyle = readStringAny(root, uiObj, "layout_style", "layoutStyle", "header_style", "headerStyle")
+            val rawEntrance = readStringAny(root, uiObj, "entrance_animation", "entranceAnimation")
+            val rawAnimation = readStringAny(root, uiObj, "animation_type", "animationType", "animation")
+
+            val showNotNowPresent = hasAnyKey(root, uiObj, "show_not_now", "showNotNow", "show_dismiss_button", "showDismissButton")
+            val showDismissValue = if (showNotNowPresent) {
+                readBooleanAny(root, uiObj, "show_not_now", "showNotNow", "show_dismiss_button", "showDismissButton", defaultValue = !mandatory)
+            } else {
+                null
+            }
+
+            val primaryBtnObj = uiObj?.optJSONObject("primary_button") ?: root.optJSONObject("primary_button")
+            val primaryBtnUrl = readStringAny(root, uiObj, primaryBtnObj, "primary_button_url", "primaryButtonUrl", "button_url", "buttonUrl")
+                .ifEmpty { apkUrl }
+            val hasExplicitShowPrimary = hasAnyKey(root, uiObj, primaryBtnObj, "show_primary_button", "showPrimaryButton")
+            val showPrimaryButton = if (hasExplicitShowPrimary) {
+                readBooleanAny(root, uiObj, "show_primary_button", "showPrimaryButton", defaultValue = true)
+            } else {
+                dialogMode == AdminDialogMode.UPDATE || primaryBtnUrl.isNotBlank() ||
+                    readStringAny(root, uiObj, primaryBtnObj, "primary_button_text", "primaryButtonText", "button_text", "buttonText", "cta_text").isNotBlank()
+            }
+
+            val buttonsArray = uiObj?.optJSONArray("buttons")
+                ?: uiObj?.optJSONArray("extra_buttons")
+                ?: uiObj?.optJSONArray("custom_buttons")
+                ?: root.optJSONArray("buttons")
+                ?: root.optJSONArray("extra_buttons")
+                ?: root.optJSONArray("custom_buttons")
+            val parsedButtons = parseButtonsArray(buttonsArray)
+
+            val blocksArray = uiObj?.optJSONArray("ui_blocks")
+                ?: uiObj?.optJSONArray("blocks")
+                ?: uiObj?.optJSONArray("sections")
+                ?: root.optJSONArray("ui_blocks")
+                ?: root.optJSONArray("blocks")
+                ?: root.optJSONArray("sections")
+            val parsedBlocks = parseUiBlocksArray(blocksArray)
+
+            return AdminDialogUiConfig(
+                layoutStyle = AdminDialogLayoutStyle.fromRaw(rawLayoutStyle),
+                entranceAnimation = AdminEntranceAnimation.fromRaw(rawEntrance),
+                animationType = AdminAnimationType.fromRaw(rawAnimation),
+                showHeaderWave = readBooleanAny(root, uiObj, "show_header_wave", "showHeaderWave", defaultValue = true),
+                showSparkles = readBooleanAny(root, uiObj, "show_sparkles", "showSparkles", defaultValue = true),
+                showConfetti = readBooleanAny(root, uiObj, "show_confetti", "showConfetti", defaultValue = false),
+                titleAlign = readStringAny(root, uiObj, "title_align", "titleAlign").ifEmpty { "start" },
+
+                backdropColorHex = readStringAny(root, uiObj, "backdrop_color", "backdropColor", "bg_color", "background_color"),
+                backdropGradientEndHex = readStringAny(root, uiObj, "backdrop_gradient_end", "backdropGradientEnd", "bg_gradient_end"),
+                backdropImageUrl = readStringAny(root, uiObj, "backdrop_image_url", "backdropImageUrl", "background_image_url"),
+                backdropDimAlpha = readFloatAny(root, uiObj, "backdrop_dim_alpha", "backdropDimAlpha", defaultValue = 0.28f).coerceIn(0f, 0.92f),
+                cardColorHex = readStringAny(root, uiObj, "card_color", "cardColor", "dialog_color"),
+                cardGradientEndHex = readStringAny(root, uiObj, "card_gradient_end", "cardGradientEnd"),
+                cardBorderColorHex = readStringAny(root, uiObj, "card_border_color", "cardBorderColor", "border_color"),
+                cardCornerRadiusDp = readIntAny(root, uiObj, "card_corner_radius", "cardCornerRadius", defaultValue = 24).coerceIn(0, 44),
+                headerColorHex = readStringAny(root, uiObj, "header_color", "headerColor", "wave_color"),
+                headerGradientEndHex = readStringAny(root, uiObj, "header_gradient_end", "headerGradientEnd"),
+                titleColorHex = readStringAny(root, uiObj, "title_color", "titleColor"),
+                subtitleColorHex = readStringAny(root, uiObj, "subtitle_color", "subtitleColor"),
+                descriptionColorHex = readStringAny(root, uiObj, "description_color", "descriptionColor", "text_color"),
+                versionColorHex = readStringAny(root, uiObj, "version_color", "versionColor"),
+                accentColorHex = readStringAny(root, uiObj, "accent_color", "accentColor"),
+
+                subtitle = readStringAny(root, uiObj, "subtitle", "sub_title"),
+                badgeText = readStringAny(root, uiObj, "badge_text", "badgeText", "tag"),
+                badgeColorHex = readStringAny(root, uiObj, "badge_color", "badgeColor"),
+                badgeTextColorHex = readStringAny(root, uiObj, "badge_text_color", "badgeTextColor"),
+                highlightTitle = readStringAny(root, uiObj, "highlight_title", "highlightTitle"),
+                highlightText = readStringAny(root, uiObj, "highlight_text", "highlightText", "notice_text"),
+                highlightBgColorHex = readStringAny(root, uiObj, "highlight_bg_color", "highlightBgColor"),
+                highlightTextColorHex = readStringAny(root, uiObj, "highlight_text_color", "highlightTextColor"),
+                footerText = readStringAny(root, uiObj, "footer_text", "footerText"),
+                footerColorHex = readStringAny(root, uiObj, "footer_color", "footerColor"),
+
+                mediaType = parsedMediaType,
+                mediaUrl = resolvedMediaUrl,
+                thumbnailUrl = readStringAny(root, uiObj, mediaObj, "video_thumbnail_url", "thumbnail_url", "thumbnailUrl", "poster_url"),
+                mediaHeightDp = readIntAny(root, uiObj, mediaObj, "media_height_dp", "mediaHeightDp", "media_height", defaultValue = 200).coerceIn(90, 460),
+                mediaCornerRadiusDp = readIntAny(root, uiObj, mediaObj, "media_corner_radius_dp", "mediaCornerRadiusDp", defaultValue = 16).coerceIn(0, 36),
+                mediaContentScale = readStringAny(root, uiObj, mediaObj, "media_content_scale", "mediaContentScale", "content_scale").ifEmpty { "crop" },
+                videoAutoplay = readBooleanAny(root, uiObj, mediaObj, "video_autoplay", "videoAutoplay", "autoplay", defaultValue = true),
+                videoLoop = readBooleanAny(root, uiObj, mediaObj, "video_loop", "videoLoop", "loop", defaultValue = true),
+                videoMuted = readBooleanAny(root, uiObj, mediaObj, "video_muted", "videoMuted", "muted", defaultValue = false),
+                videoShowControls = readBooleanAny(root, uiObj, mediaObj, "video_show_controls", "videoShowControls", "show_controls", defaultValue = true),
+
+                showPrimaryButton = showPrimaryButton,
+                primaryButtonText = readStringAny(root, uiObj, primaryBtnObj, "primary_button_text", "primaryButtonText", "button_text", "buttonText", "cta_text"),
+                primaryButtonColorHex = readStringAny(root, uiObj, primaryBtnObj, "primary_button_color", "primaryButtonColor", "button_color", "buttonColor"),
+                primaryButtonGradientEndHex = readStringAny(root, uiObj, primaryBtnObj, "primary_button_gradient_end", "primaryButtonGradientEnd", "button_gradient_end"),
+                primaryButtonTextColorHex = readStringAny(root, uiObj, primaryBtnObj, "primary_button_text_color", "primaryButtonTextColor", "button_text_color"),
+                primaryButtonIcon = readStringAny(root, uiObj, primaryBtnObj, "primary_button_icon", "primaryButtonIcon", "button_icon"),
+                primaryButtonAction = AdminButtonAction.fromRaw(
+                    readStringAny(root, uiObj, primaryBtnObj, "primary_button_action", "primaryButtonAction", "button_action")
+                ),
+                primaryButtonUrl = primaryBtnUrl,
+                primaryButtonPulse = readBooleanAny(root, uiObj, primaryBtnObj, "primary_button_pulse", "primaryButtonPulse", "button_pulse", defaultValue = false),
+
+                showDismissButton = showDismissValue,
+                dismissButtonText = readStringAny(root, uiObj, "not_now_text", "notNowText", "dismiss_button_text", "dismissButtonText"),
+                dismissButtonColorHex = readStringAny(root, uiObj, "not_now_color", "notNowColor", "dismiss_button_color", "dismissButtonColor"),
+
+                buttons = parsedButtons,
+                blocks = parsedBlocks
+            )
+        }
+
+        private fun parseButtonsArray(array: JSONArray?): List<AdminDialogButton> {
+            if (array == null) return emptyList()
+            return buildList {
+                for (i in 0 until array.length()) {
+                    val obj = array.optJSONObject(i) ?: continue
+                    val parsed = parseButtonObject(obj, fallbackIndex = i)
+                    if (parsed != null) add(parsed)
+                }
+            }
+        }
+
+        private fun parseButtonObject(obj: JSONObject, fallbackIndex: Int = 0): AdminDialogButton? {
+            val text = readStringFlat(obj, "text", "label", "title")
+            if (text.isEmpty()) return null
+            return AdminDialogButton(
+                id = readStringFlat(obj, "id", "key").ifEmpty { "btn_$fallbackIndex" },
+                text = text,
+                url = readStringFlat(obj, "url", "value", "action_value", "link", "target"),
+                action = AdminButtonAction.fromRaw(readStringFlat(obj, "action", "type")),
+                style = AdminButtonStyle.fromRaw(readStringFlat(obj, "style", "variant")),
+                bgColorHex = readStringFlat(obj, "bg_color", "bgColor", "color"),
+                gradientEndHex = readStringFlat(obj, "gradient_end", "gradientEnd"),
+                textColorHex = readStringFlat(obj, "text_color", "textColor"),
+                iconName = readStringFlat(obj, "icon", "icon_name", "iconName"),
+                cornerRadiusDp = readIntFlat(obj, "corner_radius_dp", "cornerRadiusDp", defaultValue = 50).coerceIn(4, 50),
+                rowGroup = readStringFlat(obj, "row_group", "rowGroup", "group"),
+                shareText = readStringFlat(obj, "share_text", "shareText")
+            )
+        }
+
+        private fun parseUiBlocksArray(array: JSONArray?): List<AdminUiBlock> {
+            if (array == null) return emptyList()
+            return buildList {
+                for (i in 0 until array.length()) {
+                    val obj = array.optJSONObject(i) ?: continue
+                    val type = readStringFlat(obj, "type", "block_type", "kind").lowercase()
+                    if (type.isEmpty()) continue
+
+                    val itemsList = buildList {
+                        val arr = obj.optJSONArray("items")
+                        if (arr != null) {
+                            for (j in 0 until arr.length()) {
+                                val item = arr.optString(j, "").trim()
+                                if (item.isNotEmpty()) add(item)
+                            }
+                        }
+                    }
+
+                    val singleButton = obj.optJSONObject("button")?.let { parseButtonObject(it, i) }
+                        ?: if (type == "button") parseButtonObject(obj, i) else null
+                    val rowButtons = parseButtonsArray(obj.optJSONArray("buttons"))
+
+                    add(
+                        AdminUiBlock(
+                            type = type,
+                            text = readStringFlat(obj, "text", "body", "message"),
+                            title = readStringFlat(obj, "title", "heading", "label"),
+                            items = itemsList,
+                            bgColorHex = readStringFlat(obj, "bg_color", "bgColor", "color"),
+                            textColorHex = readStringFlat(obj, "text_color", "textColor"),
+                            borderColorHex = readStringFlat(obj, "border_color", "borderColor"),
+                            accentColorHex = readStringFlat(obj, "accent_color", "accentColor"),
+                            align = readStringFlat(obj, "align", "alignment").ifEmpty { "start" },
+                            fontSizeSp = readIntFlat(obj, "font_size", "fontSize", defaultValue = 0),
+                            heightDp = readIntFlat(obj, "height_dp", "heightDp", "height", defaultValue = 0),
+                            cornerRadiusDp = readIntFlat(obj, "corner_radius_dp", "cornerRadiusDp", defaultValue = 16).coerceIn(0, 44),
+                            iconName = readStringFlat(obj, "icon", "icon_name"),
+                            mediaType = AdminMediaType.fromRaw(readStringFlat(obj, "media_type", "mediaType")),
+                            mediaUrl = readStringFlat(obj, "media_url", "mediaUrl", "url", "image_url", "gif_url", "video_url"),
+                            thumbnailUrl = readStringFlat(obj, "thumbnail_url", "thumbnailUrl", "poster_url"),
+                            contentScale = readStringFlat(obj, "content_scale", "contentScale").ifEmpty { "crop" },
+                            autoplay = readBooleanFlat(obj, "autoplay", "video_autoplay", defaultValue = true),
+                            loop = readBooleanFlat(obj, "loop", "video_loop", defaultValue = true),
+                            muted = readBooleanFlat(obj, "muted", "video_muted", defaultValue = false),
+                            showControls = readBooleanFlat(obj, "show_controls", "video_show_controls", defaultValue = true),
+                            animationType = AdminAnimationType.fromRaw(readStringFlat(obj, "animation_type", "animationType", "animation")),
+                            showVersion = readBooleanFlat(obj, "show_version", "showVersion", defaultValue = false),
+                            button = singleButton,
+                            buttons = rowButtons
+                        )
+                    )
+                }
+            }
         }
 
         /**
@@ -343,13 +655,126 @@ class UpdateRepository(
             return 0L
         }
 
-        private fun readBooleanAny(json: JSONObject, vararg keys: String, defaultValue: Boolean): Boolean {
+        private fun hasAnyKey(root: JSONObject, nested: JSONObject?, vararg keys: String): Boolean {
+            return hasAnyKey(root, nested, null, *keys)
+        }
+
+        private fun hasAnyKey(root: JSONObject, nested1: JSONObject?, nested2: JSONObject?, vararg keys: String): Boolean {
             for (key in keys) {
-                if (json.has(key) && !json.isNull(key)) {
-                    return when (val value = json.opt(key)) {
-                        is Boolean -> value
-                        is Number -> value.toInt() != 0
-                        is String -> value.trim().equals("true", ignoreCase = true) || value.trim() == "1"
+                if (nested2 != null && nested2.has(key) && !nested2.isNull(key)) return true
+                if (nested1 != null && nested1.has(key) && !nested1.isNull(key)) return true
+                if (root.has(key) && !root.isNull(key)) return true
+            }
+            return false
+        }
+
+        private fun readBooleanAny(root: JSONObject, nested: JSONObject?, vararg keys: String, defaultValue: Boolean): Boolean {
+            return readBooleanAny(root, nested, null, *keys, defaultValue = defaultValue)
+        }
+
+        private fun readBooleanAny(
+            root: JSONObject,
+            nested1: JSONObject?,
+            nested2: JSONObject?,
+            vararg keys: String,
+            defaultValue: Boolean
+        ): Boolean {
+            for (obj in listOfNotNull(nested2, nested1, root)) {
+                for (key in keys) {
+                    if (obj.has(key) && !obj.isNull(key)) {
+                        return when (val value = obj.opt(key)) {
+                            is Boolean -> value
+                            is Number -> value.toInt() != 0
+                            is String -> value.trim().equals("true", ignoreCase = true) || value.trim() == "1"
+                            else -> defaultValue
+                        }
+                    }
+                }
+            }
+            return defaultValue
+        }
+
+        private fun readStringAny(root: JSONObject, nested: JSONObject?, vararg keys: String): String {
+            return readStringAny(root, nested, null, *keys)
+        }
+
+        private fun readStringAny(root: JSONObject, nested1: JSONObject?, nested2: JSONObject?, vararg keys: String): String {
+            for (obj in listOfNotNull(nested2, nested1, root)) {
+                for (key in keys) {
+                    if (obj.has(key) && !obj.isNull(key)) {
+                        val value = obj.optString(key, "").trim()
+                        if (value.isNotEmpty() && !value.equals("null", ignoreCase = true)) return value
+                    }
+                }
+            }
+            return ""
+        }
+
+        private fun readLongAny(root: JSONObject, nested: JSONObject?, vararg keys: String, defaultValue: Long): Long {
+            for (obj in listOfNotNull(nested, root)) {
+                for (key in keys) {
+                    if (obj.has(key) && !obj.isNull(key)) {
+                        return when (val value = obj.opt(key)) {
+                            is Number -> value.toLong()
+                            is String -> value.trim().toLongOrNull() ?: defaultValue
+                            else -> defaultValue
+                        }
+                    }
+                }
+            }
+            return defaultValue
+        }
+
+        private fun readIntAny(root: JSONObject, nested: JSONObject?, vararg keys: String, defaultValue: Int): Int {
+            return readIntAny(root, nested, null, *keys, defaultValue = defaultValue)
+        }
+
+        private fun readIntAny(root: JSONObject, nested1: JSONObject?, nested2: JSONObject?, vararg keys: String, defaultValue: Int): Int {
+            for (obj in listOfNotNull(nested2, nested1, root)) {
+                for (key in keys) {
+                    if (obj.has(key) && !obj.isNull(key)) {
+                        return when (val value = obj.opt(key)) {
+                            is Number -> value.toInt()
+                            is String -> value.trim().toIntOrNull() ?: defaultValue
+                            else -> defaultValue
+                        }
+                    }
+                }
+            }
+            return defaultValue
+        }
+
+        private fun readFloatAny(root: JSONObject, nested: JSONObject?, vararg keys: String, defaultValue: Float): Float {
+            for (obj in listOfNotNull(nested, root)) {
+                for (key in keys) {
+                    if (obj.has(key) && !obj.isNull(key)) {
+                        return when (val value = obj.opt(key)) {
+                            is Number -> value.toFloat()
+                            is String -> value.trim().toFloatOrNull() ?: defaultValue
+                            else -> defaultValue
+                        }
+                    }
+                }
+            }
+            return defaultValue
+        }
+
+        private fun readStringFlat(obj: JSONObject, vararg keys: String): String {
+            for (key in keys) {
+                if (obj.has(key) && !obj.isNull(key)) {
+                    val value = obj.optString(key, "").trim()
+                    if (value.isNotEmpty() && !value.equals("null", ignoreCase = true)) return value
+                }
+            }
+            return ""
+        }
+
+        private fun readIntFlat(obj: JSONObject, vararg keys: String, defaultValue: Int): Int {
+            for (key in keys) {
+                if (obj.has(key) && !obj.isNull(key)) {
+                    return when (val value = obj.opt(key)) {
+                        is Number -> value.toInt()
+                        is String -> value.trim().toIntOrNull() ?: defaultValue
                         else -> defaultValue
                     }
                 }
@@ -357,22 +782,13 @@ class UpdateRepository(
             return defaultValue
         }
 
-        private fun readStringAny(json: JSONObject, vararg keys: String): String {
+        private fun readBooleanFlat(obj: JSONObject, vararg keys: String, defaultValue: Boolean): Boolean {
             for (key in keys) {
-                if (json.has(key) && !json.isNull(key)) {
-                    val value = json.optString(key, "").trim()
-                    if (value.isNotEmpty()) return value
-                }
-            }
-            return ""
-        }
-
-        private fun readLongAny(json: JSONObject, vararg keys: String, defaultValue: Long): Long {
-            for (key in keys) {
-                if (json.has(key) && !json.isNull(key)) {
-                    return when (val value = json.opt(key)) {
-                        is Number -> value.toLong()
-                        is String -> value.trim().toLongOrNull() ?: defaultValue
+                if (obj.has(key) && !obj.isNull(key)) {
+                    return when (val value = obj.opt(key)) {
+                        is Boolean -> value
+                        is Number -> value.toInt() != 0
+                        is String -> value.trim().equals("true", ignoreCase = true) || value.trim() == "1"
                         else -> defaultValue
                     }
                 }
@@ -428,10 +844,9 @@ class UpdateRepository(
         }
 
         /**
-         * Evaluates whether a parsed [AppUpdateInfo] should trigger the update dialog at [nowMillis].
-         * Requires BOTH:
-         * 1. Remote version is strictly newer than [currentVersion], AND
-         * 2. Either `releaseDateMillis == 0L` OR `nowMillis >= releaseDateMillis`.
+         * Evaluates whether a parsed [AppUpdateInfo] should trigger the update/custom dialog at [nowMillis].
+         * - In `UPDATE` mode: requires `enabled == true`, strictly newer `version`, release date reached, and valid `apkUrl`.
+         * - In `ANNOUNCEMENT` mode: requires `enabled == true` and release date reached (any version, optional URL).
          */
         fun evaluateUpdate(
             info: AppUpdateInfo?,
@@ -442,11 +857,15 @@ class UpdateRepository(
                 return UpdateFetchResult.UpToDate
             }
 
-            if (!isNewerVersion(currentVersion = currentVersion, serverVersion = info.version)) {
+            if (!isReleaseDateReached(releaseDateMillis = info.releaseDateMillis, nowMillis = nowMillis)) {
                 return UpdateFetchResult.UpToDate
             }
 
-            if (!isReleaseDateReached(releaseDateMillis = info.releaseDateMillis, nowMillis = nowMillis)) {
+            if (info.dialogMode == AdminDialogMode.ANNOUNCEMENT) {
+                return UpdateFetchResult.UpdateAvailable(info)
+            }
+
+            if (!isNewerVersion(currentVersion = currentVersion, serverVersion = info.version)) {
                 return UpdateFetchResult.UpToDate
             }
 
@@ -500,9 +919,21 @@ class UpdateRepository(
     }
 
     suspend fun incrementDownloadClicks(): Boolean = withContext(Dispatchers.IO) {
+        patchIncrement("""{"download_clicks":{".sv":{"increment":1}}}""")
+    }
+
+    suspend fun trackButtonClick(buttonId: String): Boolean = withContext(Dispatchers.IO) {
+        val safeKey = buttonId.trim()
+            .replace(Regex("[^a-zA-Z0-9_-]"), "_")
+            .take(48)
+            .ifEmpty { "custom_btn" }
+        patchIncrement("""{"button_clicks":{"$safeKey":{".sv":{"increment":1}}}}""")
+    }
+
+    private fun patchIncrement(payload: String): Boolean {
         val endpoint = "${databaseBaseUrl.trimEnd('/')}/${nodePath.trim('/')}.json"
         var connection: HttpURLConnection? = null
-        try {
+        return try {
             connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
                 setRequestProperty("X-HTTP-Method-Override", "PATCH")
@@ -513,7 +944,6 @@ class UpdateRepository(
                 doOutput = true
             }
 
-            val payload = """{"download_clicks":{".sv":{"increment":1}}}"""
             OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { writer ->
                 writer.write(payload)
                 writer.flush()
@@ -521,7 +951,7 @@ class UpdateRepository(
 
             connection.responseCode in 200..299
         } catch (e: Exception) {
-            runCatching { Log.w(TAG, "Failed to increment download_clicks: ${e.message}") }
+            runCatching { Log.w(TAG, "Failed to increment click telemetry: ${e.message}") }
             false
         } finally {
             connection?.disconnect()

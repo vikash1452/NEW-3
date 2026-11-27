@@ -1,6 +1,9 @@
 package com.example
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -141,6 +144,8 @@ import com.example.ui.theme.TextSecondary
 import com.example.ui.components.AppUpdateOverlay
 import com.example.ui.theme.ThermalCrimson
 import com.example.service.BatteryTelemetryHub
+import com.example.update.AdminButtonAction
+import com.example.update.AdminDialogButton
 import com.example.update.AppUpdateInfo
 import com.example.update.UpdateFetchResult
 import com.example.update.UpdateLockManager
@@ -204,6 +209,7 @@ fun BatteryBossEntryScreen(
     var pendingUpdate by remember {
         mutableStateOf(UpdateLockManager.getCachedUpdateInfo(context))
     }
+    var requestedTab by remember { mutableStateOf<BatteryBossTab?>(null) }
 
     LaunchedEffect(Unit) {
         if (showSplash) {
@@ -218,7 +224,11 @@ fun BatteryBossEntryScreen(
         UpdateLockManager.syncFromFetchResult(context, result)
         when (result) {
             is UpdateFetchResult.UpdateAvailable -> {
-                pendingUpdate = result.info
+                pendingUpdate = if (UpdateLockManager.isDialogDismissed(context, result.info)) {
+                    null
+                } else {
+                    result.info
+                }
             }
             is UpdateFetchResult.UpToDate -> {
                 pendingUpdate = null
@@ -230,7 +240,32 @@ fun BatteryBossEntryScreen(
     }
 
     val activeUpdate = pendingUpdate
+    val shouldLockApp = activeUpdate != null && (activeUpdate.isUpdateLockRequired || activeUpdate.mandatory)
     var isHandlingUpdateClick by remember { mutableStateOf(false) }
+
+    fun dismissActiveDialog() {
+        val current = pendingUpdate ?: return
+        if (!current.isUpdateLockRequired && !current.mandatory) {
+            UpdateLockManager.markDialogDismissed(context, current)
+            pendingUpdate = null
+        }
+    }
+
+    fun openExternalUrl(url: String) {
+        if (url.isBlank()) return
+        runCatching {
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+        }.onFailure {
+            Toast.makeText(
+                context,
+                context.getString(R.string.update_open_link_error),
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
 
     AnimatedContent(
         targetState = showSplash,
@@ -243,8 +278,12 @@ fun BatteryBossEntryScreen(
     ) { isSplashVisible ->
         if (isSplashVisible) {
             BatteryBossSplashScreen()
-        } else if (activeUpdate == null) {
-            BatteryBossApp(viewModel = viewModel)
+        } else if (!shouldLockApp) {
+            BatteryBossApp(
+                viewModel = viewModel,
+                requestedTab = requestedTab,
+                onRequestedTabConsumed = { requestedTab = null }
+            )
         } else {
             // App functions remain locked while a remote update is active
             Box(
@@ -256,8 +295,14 @@ fun BatteryBossEntryScreen(
     }
 
     if (!showSplash && activeUpdate != null) {
+        val effectiveInfo = if (activeUpdate.isUpdateLockRequired) {
+            activeUpdate.copy(mandatory = true)
+        } else {
+            activeUpdate
+        }
+
         AppUpdateOverlay(
-            updateInfo = activeUpdate.copy(mandatory = true),
+            updateInfo = effectiveInfo,
             onUpdateClick = { apkUrl ->
                 if (isHandlingUpdateClick) return@AppUpdateOverlay
                 isHandlingUpdateClick = true
@@ -267,28 +312,99 @@ fun BatteryBossEntryScreen(
                         withTimeoutOrNull(2_000L) {
                             runCatching { updateRepository.incrementDownloadClicks() }
                         }
-
-                        if (apkUrl.isNotBlank()) {
-                            runCatching {
-                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(apkUrl)).apply {
-                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                }
-                                context.startActivity(intent)
-                            }.onFailure {
-                                Toast.makeText(
-                                    context,
-                                    context.getString(R.string.update_open_link_error),
-                                    Toast.LENGTH_SHORT
-                                ).show()
-                            }
-                        }
+                        openExternalUrl(apkUrl)
                     } finally {
                         isHandlingUpdateClick = false
                     }
                 }
             },
-            onDismiss = { /* Locked while remote update is active */ }
+            onDismiss = { dismissActiveDialog() },
+            onButtonAction = { button: AdminDialogButton ->
+                when (button.action) {
+                    AdminButtonAction.DISMISS -> dismissActiveDialog()
+                    AdminButtonAction.COPY -> {
+                        val copyValue = button.url.ifBlank { button.text }
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                        clipboard?.setPrimaryClip(ClipData.newPlainText("Battery Boss", copyValue))
+                        Toast.makeText(
+                            context,
+                            context.getString(R.string.update_copied_to_clipboard),
+                            Toast.LENGTH_SHORT
+                        ).show()
+                        coroutineScope.launch {
+                            withTimeoutOrNull(1_500L) {
+                                runCatching { updateRepository.trackButtonClick(button.id) }
+                            }
+                        }
+                    }
+                    AdminButtonAction.SHARE -> {
+                        val shareContent = button.shareText.ifBlank {
+                            button.url.ifBlank { activeUpdate.title }
+                        }
+                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_TEXT, shareContent)
+                        }
+                        runCatching {
+                            context.startActivity(
+                                Intent.createChooser(shareIntent, button.text.ifBlank { "Share" }).apply {
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                            )
+                        }
+                        coroutineScope.launch {
+                            withTimeoutOrNull(1_500L) {
+                                runCatching { updateRepository.trackButtonClick(button.id) }
+                            }
+                        }
+                    }
+                    AdminButtonAction.OPEN_TAB -> {
+                        val targetTab = resolveTabFromTarget(button.url)
+                        if (targetTab != null) {
+                            requestedTab = targetTab
+                        }
+                        dismissActiveDialog()
+                        coroutineScope.launch {
+                            withTimeoutOrNull(1_500L) {
+                                runCatching { updateRepository.trackButtonClick(button.id) }
+                            }
+                        }
+                    }
+                    AdminButtonAction.OPEN_URL -> {
+                        if (isHandlingUpdateClick) return@AppUpdateOverlay
+                        isHandlingUpdateClick = true
+                        coroutineScope.launch {
+                            try {
+                                withTimeoutOrNull(2_000L) {
+                                    runCatching {
+                                        if (button.id == "primary") {
+                                            updateRepository.incrementDownloadClicks()
+                                        } else {
+                                            updateRepository.trackButtonClick(button.id)
+                                        }
+                                    }
+                                }
+                                openExternalUrl(button.url)
+                            } finally {
+                                isHandlingUpdateClick = false
+                            }
+                        }
+                    }
+                }
+            }
         )
+    }
+}
+
+private fun resolveTabFromTarget(rawTarget: String): BatteryBossTab? {
+    return when (rawTarget.trim().lowercase()) {
+        "dashboard", "home" -> BatteryBossTab.DASHBOARD
+        "smart_tracker", "tracker" -> BatteryBossTab.SMART_TRACKER
+        "voice_alerts", "voice", "voice_studio" -> BatteryBossTab.VOICE_ALERTS
+        "battery_health", "health" -> BatteryBossTab.BATTERY_HEALTH
+        "hardware_oem", "oem", "hardware" -> BatteryBossTab.HARDWARE_OEM
+        "history_about", "analytics", "history", "about" -> BatteryBossTab.HISTORY_ABOUT
+        else -> null
     }
 }
 
@@ -760,7 +876,9 @@ fun BatteryBossSplashScreen(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BatteryBossApp(
-    viewModel: BatteryBossViewModel = viewModel()
+    viewModel: BatteryBossViewModel = viewModel(),
+    requestedTab: BatteryBossTab? = null,
+    onRequestedTabConsumed: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val snapshot by viewModel.snapshot.collectAsStateWithLifecycle()
@@ -798,6 +916,13 @@ fun BatteryBossApp(
     }
 
     var currentTab by rememberSaveable { mutableStateOf(BatteryBossTab.DASHBOARD) }
+
+    LaunchedEffect(requestedTab) {
+        if (requestedTab != null) {
+            currentTab = requestedTab
+            onRequestedTabConsumed()
+        }
+    }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
