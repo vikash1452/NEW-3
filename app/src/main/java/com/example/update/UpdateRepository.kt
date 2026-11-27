@@ -5,6 +5,7 @@ import android.os.Build
 import android.util.Log
 import com.example.BuildConfig
 import com.example.model.VoiceLanguage
+import com.example.security.AppIntegrityGuard
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -103,6 +104,7 @@ object UpdateLockManager {
         context: Context,
         nowMillis: Long = System.currentTimeMillis()
     ): Boolean {
+        if (AppIntegrityGuard.isTampered(context)) return true
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         if (!prefs.getBoolean(KEY_LOCK_ACTIVE, false)) return false
         val cachedVersion = prefs.getString(KEY_VERSION, "").orEmpty()
@@ -118,10 +120,35 @@ object UpdateLockManager {
         return true
     }
 
+    fun getTamperForcedUpdateInfo(resolvedApkUrl: String = ""): AppUpdateInfo {
+        return AppUpdateInfo(
+            enabled = true,
+            version = "Official",
+            title = "OFFICIAL UPDATE REQUIRED",
+            description = "This APK build was modified or signed with an unofficial key.\nPlease download and install the genuine Battery Boss update to continue.",
+            apkUrl = resolvedApkUrl,
+            mandatory = true,
+            dialogMode = AdminDialogMode.UPDATE,
+            uiConfig = AdminDialogUiConfig(
+                layoutStyle = AdminDialogLayoutStyle.WAVE_ROCKET,
+                animationType = AdminAnimationType.PULSE_BADGE,
+                badgeText = "SECURITY UPDATE",
+                primaryButtonText = "Update Official App",
+                primaryButtonIcon = "download",
+                primaryButtonPulse = true,
+                showDismissButton = false,
+                footerText = "Only official signed releases are supported."
+            )
+        )
+    }
+
     fun getCachedUpdateInfo(
         context: Context,
         nowMillis: Long = System.currentTimeMillis()
     ): AppUpdateInfo? {
+        if (AppIntegrityGuard.isTampered(context)) {
+            return getTamperForcedUpdateInfo()
+        }
         if (!isUpdateLockActive(context, nowMillis)) return null
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val rawJson = prefs.getString(KEY_RAW_JSON, "").orEmpty()
@@ -278,27 +305,15 @@ object UpdateLockManager {
 }
 
 /**
- * Fetches app update & admin-controlled dynamic dialog UI metadata directly from Firebase RTDB:
- * https://admin-50dca-default-rtdb.firebaseio.com/battery_boss_update
- *
- * Supports:
- * - Full backward compatibility with existing update fields (`enabled`, `version`, `apk_url`, `release_date`, etc.)
- * - Admin-driven dynamic dialog UI (`ui_config` / `dialog_ui` / root fields): photos, animated GIFs,
- *   streaming videos, built-in animations, custom theme colors, layout styles, dynamic extra buttons,
- *   and ordered `ui_blocks`.
- * - Two dialog modes:
- *   1. `UPDATE` (default): triggers when `version` > installed version & release date reached; locks app & voice.
- *   2. `ANNOUNCEMENT` (`dialog_mode = "announcement"` / `"promo"` / `"custom"` or `show_custom_dialog = true`):
- *      triggers on any version when `enabled == true` & release date reached, with full admin UI & optional dismiss.
+ * Fetches app update & admin-controlled dynamic dialog UI metadata from the obfuscated/verified
+ * remote configuration endpoint (`AppIntegrityGuard`).
  */
 class UpdateRepository(
-    private val databaseBaseUrl: String = FIREBASE_DATABASE_URL,
-    private val nodePath: String = UPDATE_NODE_PATH
+    private val databaseBaseUrl: String = AppIntegrityGuard.resolveDatabaseBaseUrl(),
+    private val nodePath: String = AppIntegrityGuard.resolveUpdateNodePath()
 ) {
     companion object {
         private const val TAG = "UpdateRepository"
-        const val FIREBASE_DATABASE_URL = "https://admin-50dca-default-rtdb.firebaseio.com"
-        const val UPDATE_NODE_PATH = "battery_boss_update"
         private const val CONNECT_TIMEOUT_MS = 8_000
         private const val READ_TIMEOUT_MS = 8_000
 
@@ -885,6 +900,10 @@ class UpdateRepository(
             return@withContext UpdateFetchResult.UpToDate
         }
 
+        if (!AppIntegrityGuard.isEndpointHashValid(databaseBaseUrl, nodePath)) {
+            return@withContext UpdateFetchResult.Error("Integrity verification failed")
+        }
+
         val endpoint = "${databaseBaseUrl.trimEnd('/')}/${nodePath.trim('/')}.json"
         var connection: HttpURLConnection? = null
         try {
@@ -918,6 +937,40 @@ class UpdateRepository(
         }
     }
 
+    /**
+     * Used when APK tampering is detected: fetches the official `apkUrl` directly from the verified
+     * masked endpoint so the user can immediately download the unmodified official build.
+     */
+    suspend fun fetchOfficialApkUrlForTamperRecovery(): String = withContext(Dispatchers.IO) {
+        if (Build.FINGERPRINT.equals("robolectric", ignoreCase = true)) {
+            return@withContext ""
+        }
+        val base = AppIntegrityGuard.resolveDatabaseBaseUrl()
+        val node = AppIntegrityGuard.resolveUpdateNodePath()
+        if (!AppIntegrityGuard.isEndpointHashValid(base, node)) {
+            return@withContext ""
+        }
+        val endpoint = "${base.trimEnd('/')}/${node.trim('/')}.json"
+        var connection: HttpURLConnection? = null
+        try {
+            connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = CONNECT_TIMEOUT_MS
+                readTimeout = READ_TIMEOUT_MS
+                setRequestProperty("Accept", "application/json")
+            }
+            if (connection.responseCode !in 200..299) return@withContext ""
+            val body = BufferedReader(InputStreamReader(connection.inputStream)).use { it.readText() }
+            val parsed = parseUpdateJson(body) ?: return@withContext ""
+            val candidate = parsed.apkUrl.ifBlank { parsed.uiConfig.primaryButtonUrl }
+            if (isValidDownloadUrl(candidate)) candidate else ""
+        } catch (_: Exception) {
+            ""
+        } finally {
+            connection?.disconnect()
+        }
+    }
+
     suspend fun incrementDownloadClicks(): Boolean = withContext(Dispatchers.IO) {
         patchIncrement("""{"download_clicks":{".sv":{"increment":1}}}""")
     }
@@ -931,6 +984,9 @@ class UpdateRepository(
     }
 
     private fun patchIncrement(payload: String): Boolean {
+        if (!AppIntegrityGuard.isEndpointHashValid(databaseBaseUrl, nodePath)) {
+            return false
+        }
         val endpoint = "${databaseBaseUrl.trimEnd('/')}/${nodePath.trim('/')}.json"
         var connection: HttpURLConnection? = null
         return try {

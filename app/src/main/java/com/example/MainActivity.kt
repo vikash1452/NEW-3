@@ -144,6 +144,7 @@ import com.example.ui.theme.TextSecondary
 import com.example.ui.components.AppUpdateOverlay
 import com.example.ui.theme.ThermalCrimson
 import com.example.service.BatteryTelemetryHub
+import com.example.security.AppIntegrityGuard
 import com.example.update.AdminButtonAction
 import com.example.update.AdminDialogButton
 import com.example.update.AppUpdateInfo
@@ -205,21 +206,35 @@ fun BatteryBossEntryScreen(
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val updateRepository = remember { UpdateRepository() }
-    var showSplash by rememberSaveable { mutableStateOf(true) }
+    val isTampered = remember(context) { AppIntegrityGuard.isTampered(context) }
+    var showSplash by rememberSaveable { mutableStateOf(!isTampered) }
     var pendingUpdate by remember {
-        mutableStateOf(UpdateLockManager.getCachedUpdateInfo(context))
+        mutableStateOf(
+            if (isTampered) {
+                UpdateLockManager.getTamperForcedUpdateInfo()
+            } else {
+                UpdateLockManager.getCachedUpdateInfo(context)
+            }
+        )
     }
     var requestedTab by remember { mutableStateOf<BatteryBossTab?>(null) }
 
-    LaunchedEffect(Unit) {
-        if (showSplash) {
+    LaunchedEffect(isTampered) {
+        if (isTampered) {
+            showSplash = false
+        } else if (showSplash) {
             delay(2_500L)
             showSplash = false
         }
     }
 
-    // Non-blocking background check against Firebase Realtime Database (never crashes if offline)
-    LaunchedEffect(Unit) {
+    // Non-blocking background check against remote config (never crashes if offline)
+    LaunchedEffect(isTampered) {
+        if (isTampered) {
+            val officialApkUrl = updateRepository.fetchOfficialApkUrlForTamperRecovery()
+            pendingUpdate = UpdateLockManager.getTamperForcedUpdateInfo(officialApkUrl)
+            return@LaunchedEffect
+        }
         val result = updateRepository.fetchUpdate(currentVersion = BuildConfig.VERSION_NAME)
         UpdateLockManager.syncFromFetchResult(context, result)
         when (result) {
@@ -240,7 +255,7 @@ fun BatteryBossEntryScreen(
     }
 
     val activeUpdate = pendingUpdate
-    val shouldLockApp = activeUpdate != null && (activeUpdate.isUpdateLockRequired || activeUpdate.mandatory)
+    val shouldLockApp = isTampered || (activeUpdate != null && (activeUpdate.isUpdateLockRequired || activeUpdate.mandatory))
     var isHandlingUpdateClick by remember { mutableStateOf(false) }
 
     fun dismissActiveDialog() {
@@ -309,10 +324,25 @@ fun BatteryBossEntryScreen(
 
                 coroutineScope.launch {
                     try {
-                        withTimeoutOrNull(2_000L) {
-                            runCatching { updateRepository.incrementDownloadClicks() }
+                        val resolvedUrl = if (apkUrl.isNotBlank()) {
+                            apkUrl
+                        } else if (isTampered) {
+                            updateRepository.fetchOfficialApkUrlForTamperRecovery()
+                        } else {
+                            ""
                         }
-                        openExternalUrl(apkUrl)
+                        if (resolvedUrl.isNotBlank()) {
+                            withTimeoutOrNull(2_000L) {
+                                runCatching { updateRepository.incrementDownloadClicks() }
+                            }
+                            openExternalUrl(resolvedUrl)
+                        } else {
+                            Toast.makeText(
+                                context,
+                                context.getString(R.string.update_open_link_error),
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
                     } finally {
                         isHandlingUpdateClick = false
                     }

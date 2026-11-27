@@ -1,21 +1,37 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# Battery Boss R8 Obfuscation & Keep Rules
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# Repackage obfuscated classes into a single flat package and hide source file names
+-repackageclasses 'o'
+-allowaccessmodification
+-renamesourcefileattribute SourceFile
+-keepattributes Signature,InnerClasses,EnclosingMethod,RuntimeVisibleAnnotations
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# Keep @Keep annotated classes/members (Models, Entities, etc.)
+-keep class androidx.annotation.Keep
+-keep @androidx.annotation.Keep class * { *; }
+-keepclasseswithmembers class * {
+    @androidx.annotation.Keep <methods>;
+}
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# Keep Room Databases & Entities
+-keep class * extends androidx.room.RoomDatabase
+-keep @androidx.room.Entity class * { *; }
+-keep @androidx.room.Dao interface * { *; }
+
+# Keep AndroidManifest Services, Receivers, Activities
+-keep public class * extends android.app.Activity
+-keep public class * extends android.app.Service
+-keep public class * extends android.content.BroadcastReceiver
+-keep public class * extends android.accessibilityservice.AccessibilityService
+
+# Keep Media3 / ExoPlayer & Coil GIF runtime reflection targets
+-keep class androidx.media3.** { *; }
+-dontwarn androidx.media3.**
+-keep class coil.decode.** { *; }
+
+# Strip verbose debug logs in release builds
+-assumenosideeffects class android.util.Log {
+    public static int d(...);
+    public static int v(...);
+    public static int i(...);
+}

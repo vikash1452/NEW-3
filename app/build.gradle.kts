@@ -19,6 +19,12 @@ android {
     versionName = "2.2"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+    val releaseCertSha256 = (System.getenv("RELEASE_CERT_SHA256") ?: "")
+      .replace(":", "")
+      .trim()
+      .uppercase()
+    buildConfigField("String", "RELEASE_CERT_SHA256", "\"$releaseCertSha256\"")
   }
 
   // Do not remove or modify these signingConfigs. They are necessary for building, installing,
@@ -42,7 +48,8 @@ android {
   buildTypes {
     release {
       isCrunchPngs = false
-      isMinifyEnabled = false
+      isMinifyEnabled = true
+      isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
       // Do not remove or modify this signingConfig assignment. It is necessary for Android apps in
       // AI Studio.

@@ -397,4 +397,41 @@ class UpdateRepositoryTest {
         UpdateLockManager.markDialogDismissed(context, parsed)
         assertTrue(UpdateLockManager.isDialogDismissed(context, parsed))
     }
+
+    @Test
+    fun `integrity guard decodes masked endpoint detects altered firebase url and forces mandatory update when tampered`() {
+        val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+
+        try {
+            assertEquals(
+                "com.aistudio.batteryboss.kxzpwn",
+                com.example.security.AppIntegrityGuard.resolveExpectedPackageName()
+            )
+            assertEquals(
+                "99D13B137520F8D13E3B2A51F4E51219E4DC2E1486595EAEA8BDD423D6782F11",
+                com.example.security.AppIntegrityGuard.resolveExpectedDebugCertSha256()
+            )
+            assertTrue(com.example.security.AppIntegrityGuard.isEndpointHashValid())
+            assertFalse(
+                com.example.security.AppIntegrityGuard.isEndpointHashValid(
+                    baseUrl = "https://attacker-fake-db.firebaseio.com",
+                    nodePath = "battery_boss_update"
+                )
+            )
+            assertFalse(com.example.security.AppIntegrityGuard.isTampered(context))
+
+            // Simulate APK code/signature tampering
+            com.example.security.AppIntegrityGuard.setTamperOverrideForTest(true)
+            assertTrue(com.example.security.AppIntegrityGuard.isTampered(context))
+            assertTrue(UpdateLockManager.isUpdateLockActive(context))
+
+            val forcedUpdate = UpdateLockManager.getCachedUpdateInfo(context)
+            assertNotNull(forcedUpdate)
+            assertTrue(forcedUpdate!!.mandatory)
+            assertEquals("OFFICIAL UPDATE REQUIRED", forcedUpdate.title)
+        } finally {
+            com.example.security.AppIntegrityGuard.setTamperOverrideForTest(null)
+            UpdateLockManager.clearLock(context)
+        }
+    }
 }
