@@ -1,4 +1,34 @@
+import java.io.ByteArrayInputStream
+import java.security.KeyStore
+import java.security.MessageDigest
 import java.time.Duration
+import java.util.Base64
+
+fun maskSecretToHex(plain: String): String {
+  if (plain.isEmpty()) return ""
+  val maskKey = intArrayOf(0x5A, 0xA3, 0x3C, 0x71, 0x9E, 0x24, 0xD7, 0x4B, 0x18, 0x6F, 0xC2, 0x85)
+  val bytes = plain.toByteArray(Charsets.UTF_8)
+  val sb = StringBuilder(bytes.size * 2)
+  for (i in bytes.indices) {
+    val k = maskKey[i % maskKey.size]
+    val shift = (i * 17) and 0xFF
+    val masked = ((bytes[i].toInt() and 0xFF) xor k xor shift) and 0xFF
+    sb.append(String.format("%02x", masked))
+  }
+  return sb.toString()
+}
+
+fun readDebugKeystoreCertSha256(keystoreBytes: ByteArray?): String {
+  if (keystoreBytes == null || keystoreBytes.isEmpty()) return ""
+  return runCatching {
+    val ks = KeyStore.getInstance(KeyStore.getDefaultType())
+    ks.load(ByteArrayInputStream(keystoreBytes), "android".toCharArray())
+    val cert = ks.getCertificate("androiddebugkey") ?: return ""
+    MessageDigest.getInstance("SHA-256")
+      .digest(cert.encoded)
+      .joinToString("") { "%02X".format(it) }
+  }.getOrDefault("")
+}
 
 plugins {
   alias(libs.plugins.android.application)
@@ -15,16 +45,31 @@ android {
     applicationId = "com.aistudio.batteryboss.kxzpwn"
     minSdk = 24
     targetSdk = 36
-    versionCode = 4
+    versionCode = 5
     versionName = "2.2"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+    val debugKeystoreBytes = providers
+      .fileContents(rootProject.layout.projectDirectory.file("debug.keystore"))
+      .asBytes
+      .orNull
+      ?: providers
+        .fileContents(rootProject.layout.projectDirectory.file("debug.keystore.base64"))
+        .asText
+        .orNull
+        ?.replace(Regex("\\s+"), "")
+        ?.takeIf { it.isNotEmpty() }
+        ?.let { runCatching { Base64.getDecoder().decode(it) }.getOrNull() }
+
+    val debugSignerSha256 = readDebugKeystoreCertSha256(debugKeystoreBytes)
+    buildConfigField("String", "BUILD_SIGNER_MASKED", "\"${maskSecretToHex(debugSignerSha256)}\"")
 
     val releaseCertSha256 = (System.getenv("RELEASE_CERT_SHA256") ?: "")
       .replace(":", "")
       .trim()
       .uppercase()
-    buildConfigField("String", "RELEASE_CERT_SHA256", "\"$releaseCertSha256\"")
+    buildConfigField("String", "RELEASE_CERT_SHA256", "\"${maskSecretToHex(releaseCertSha256)}\"")
   }
 
   // Do not remove or modify these signingConfigs. They are necessary for building, installing,

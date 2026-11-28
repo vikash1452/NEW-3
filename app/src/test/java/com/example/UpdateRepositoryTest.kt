@@ -407,10 +407,9 @@ class UpdateRepositoryTest {
                 "com.aistudio.batteryboss.kxzpwn",
                 com.example.security.AppIntegrityGuard.resolveExpectedPackageName()
             )
-            assertEquals(
-                "99D13B137520F8D13E3B2A51F4E51219E4DC2E1486595EAEA8BDD423D6782F11",
-                com.example.security.AppIntegrityGuard.resolveExpectedDebugCertSha256()
-            )
+            val embeddedCert = com.example.security.AppIntegrityGuard.resolveExpectedBuildCertSha256()
+            assertEquals(64, embeddedCert.length)
+            assertTrue(embeddedCert.all { it in '0'..'9' || it in 'A'..'F' })
             assertTrue(com.example.security.AppIntegrityGuard.isEndpointHashValid())
             assertFalse(
                 com.example.security.AppIntegrityGuard.isEndpointHashValid(

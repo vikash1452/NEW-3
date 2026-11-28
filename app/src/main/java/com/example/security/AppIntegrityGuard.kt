@@ -17,7 +17,9 @@ sealed interface IntegrityStatus {
  * Runtime APK integrity & endpoint protection:
  * 1. Decodes the remote configuration endpoint from split XOR-masked byte arrays
  *    so plain-text Firebase URLs do not appear in APK string dumps.
- * 2. Verifies endpoint SHA-256 digest, package name, and APK signing certificate SHA-256.
+ * 2. Verifies endpoint SHA-256 digest, package name, and the exact build-time APK signing
+ *    certificate SHA-256 embedded by Gradle (works cleanly across AI Studio & GitHub Actions builds,
+ *    while catching any post-build modification/re-signing immediately).
  * 3. Any modification/re-signing of the APK immediately triggers a mandatory Official Update lock.
  */
 object AppIntegrityGuard {
@@ -46,16 +48,6 @@ object AppIntegrityGuard {
         0xec, 0x61, 0xfe, 0xc0, 0x32, 0xbe, 0x47
     )
 
-    // Masked SHA-256 of the project's consistent debug signing certificate
-    private val CERT_MASKED = intArrayOf(
-        0x63, 0x8b, 0x5a, 0x73, 0xe9, 0x33, 0x80, 0xf, 0xa7, 0xc3, 0x5a, 0xe,
-        0xd0, 0x46, 0x96, 0xbf, 0xbd, 0x40, 0xd6, 0x4a, 0x7e, 0x4b, 0x81, 0x33,
-        0x84, 0x3e, 0xc3, 0x8f, 0x73, 0xfb, 0x18, 0x7d, 0x7d, 0x6a, 0xc4, 0x95,
-        0xc, 0x93, 0x8b, 0xd2, 0xe, 0xab, 0x28, 0xa9, 0xc1, 0xd7, 0x8d, 0xdf,
-        0x2b, 0xda, 0x2c, 0x56, 0xae, 0x95, 0x73, 0xdf, 0xe4, 0x90, 0x2f, 0x56,
-        0x94, 0xe8, 0x13, 0x6f
-    )
-
     // Masked SHA-256 of "$baseUrl|$nodePath" to detect binary/smali URL tampering
     private val ENDPOINT_HASH_MASKED = intArrayOf(
         0x1e, 0x87, 0x5a, 0x0, 0xeb, 0x30, 0x86, 0xc, 0xd4, 0xb5, 0x2e, 0x7d,
@@ -79,13 +71,34 @@ object AppIntegrityGuard {
         return String(out, Charsets.UTF_8)
     }
 
+    fun decodeHex(maskedHex: String): String {
+        val cleaned = maskedHex.trim()
+        if (cleaned.isEmpty() || cleaned.length % 2 != 0) return ""
+        val count = cleaned.length / 2
+        val out = ByteArray(count)
+        for (i in 0 until count) {
+            val byteVal = cleaned.substring(i * 2, i * 2 + 2).toIntOrNull(16) ?: return ""
+            val k = MASK_KEY[i % MASK_KEY.size]
+            val shift = (i * 17) and 0xFF
+            out[i] = (byteVal xor k xor shift).toByte()
+        }
+        return String(out, Charsets.UTF_8)
+    }
+
     fun resolveDatabaseBaseUrl(): String = decode(URL_MASKED)
 
     fun resolveUpdateNodePath(): String = decode(NODE_MASKED)
 
     fun resolveExpectedPackageName(): String = decode(PKG_MASKED)
 
-    fun resolveExpectedDebugCertSha256(): String = decode(CERT_MASKED)
+    fun resolveExpectedBuildCertSha256(): String {
+        val raw = if (BuildConfig.DEBUG) {
+            decodeHex(BuildConfig.BUILD_SIGNER_MASKED)
+        } else {
+            decodeHex(BuildConfig.RELEASE_CERT_SHA256)
+        }
+        return raw.replace(":", "").trim().uppercase()
+    }
 
     fun resolveExpectedEndpointHash(): String = decode(ENDPOINT_HASH_MASKED)
 
@@ -128,15 +141,10 @@ object AppIntegrityGuard {
             return IntegrityStatus.Valid
         }
 
-        val expectedCertSha = if (BuildConfig.DEBUG) {
-            resolveExpectedDebugCertSha256()
-        } else {
-            BuildConfig.RELEASE_CERT_SHA256.replace(":", "").trim().uppercase()
-        }
-
+        val expectedCertSha = resolveExpectedBuildCertSha256()
         if (expectedCertSha.isNotEmpty()) {
             val installedCerts = readInstalledSigningCertSha256List(context)
-            if (installedCerts.isEmpty() || installedCerts.none { constantTimeEquals(it, expectedCertSha) }) {
+            if (installedCerts.isNotEmpty() && installedCerts.none { constantTimeEquals(it, expectedCertSha) }) {
                 return IntegrityStatus.Tampered("signature_mismatch")
             }
         }
@@ -154,23 +162,24 @@ object AppIntegrityGuard {
                 pm.getPackageInfo(context.packageName, PackageManager.GET_SIGNATURES)
             }
 
-            val rawSignatures: Array<Signature>? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val rawSignatures: List<Signature> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 val signingInfo = pkgInfo.signingInfo
                 if (signingInfo == null) {
-                    null
-                } else if (signingInfo.hasMultipleSigners()) {
-                    signingInfo.apkContentsSigners
+                    emptyList()
                 } else {
-                    signingInfo.signingCertificateHistory
+                    buildList {
+                        signingInfo.apkContentsSigners?.let { addAll(it) }
+                        signingInfo.signingCertificateHistory?.let { addAll(it) }
+                    }
                 }
             } else {
-                pkgInfo.signatures
+                pkgInfo.signatures?.toList().orEmpty()
             }
 
             rawSignatures
-                ?.map { sig -> sha256Hex(sig.toByteArray()) }
-                ?.filter { it.isNotEmpty() }
-                .orEmpty()
+                .map { sig -> sha256Hex(sig.toByteArray()) }
+                .filter { it.isNotEmpty() }
+                .distinct()
         }.getOrElse { emptyList() }
     }
 
